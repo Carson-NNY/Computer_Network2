@@ -7,6 +7,8 @@
 
 import socket # for UDP connection
 import struct
+
+FIN = 0x4
 #
 # Server
 #
@@ -34,31 +36,25 @@ class Server:
         return:
         the connection to the client 
         """
-        print("Waiting for a client connection...")
-        data_bi, client_addr = self.server_socket.recvfrom(self.receive_buffer_size)  # Blocking receive
-        # data_bi, client_addr = self.server_socket.recvfrom(20)  # Blocking receive
+        pass
+        # print("Waiting for a client connection...")
+        #
+        # conn = {
+        #     "client_addr": None,
+        # }
+        #
+        # while True:
+        #     data_bi, client_addr = self.server_socket.recvfrom(self.receive_buffer_size)
+        #     seg = Segment.extract_header(data_bi)
+        #
+        #     # First segment received → Store client address
+        #     if conn["client_addr"] is None:
+        #         conn["client_addr"] = client_addr
+        #         conn["buffer"] = seg.payload
+        #         print(f"Connection established with {client_addr}")
+        #         return conn
 
-        try:
-            seg = Segment.extract_header(data_bi)
-            print(f"Received Segment from {client_addr}:")
-            print(f"  src_port: {seg.src_port}")
-            print(f"  dst_port: {seg.dst_port}")
-            print(f"  seq: {seg.seq}")
-            print(f"  ack: {seg.ack}")
-            print(f"  type: {seg.type}")
-            print(f"  window: {seg.window}")
-            print(f"  payload: {seg.payload}")
-            print(f"  checksum: {seg.cksum}")
-        except Exception as e:
-            print(f"Error parsing segment: {e}")
 
-        # Create a connection object for the client
-        conn = {
-            "client_addr": client_addr,
-            "buffer": bytearray(),
-        }
-
-        return conn
 
     def receive(self, conn, length):
         """
@@ -75,14 +71,36 @@ class Server:
         return:
         data -- the bytes received from the client, guaranteed to be in its original order
         """
-        data = b""
-        # while len(data) < length:
-        #     segment, addr = self.server_socket.recvfrom(self.receive_buffer_size)
-        #     print(f"Received {len(segment)} bytes from {addr}")
-        #     if addr == conn["client_addr"]:
-        #         data += segment
-        self.close()
-        return data
+        self.server_socket.settimeout(20)
+        data = bytearray()
+        # data = bytearray(conn["buffer"])
+        while len(data) < length:
+            try:
+                data_bi, addr = self.server_socket.recvfrom(self.receive_buffer_size)
+            except socket.timeout:
+                print("Socket timed out – no more data received.")
+                break
+
+            # if addr != conn["client_addr"]:
+            #     print(f"Received segment from unknown client {addr}, ignoring.")
+            #     continue
+
+            try:
+                seg = Segment.extract_header(data_bi)
+            except Exception as e:
+                print(f"Error parsing segment: {e}")
+                continue
+
+            if seg.type & FIN:
+                print("FIN segment received. Ending.....")
+                break
+
+            print(f"=============================Received segment: seq={seg.seq}, size={len(seg.payload)}")
+            print(f"  payload: {seg.payload}")
+
+            data.extend(seg.payload)
+        self.server_socket.settimeout(None)
+        return bytes(data)
 
     def close(self):
         """

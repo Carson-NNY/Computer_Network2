@@ -8,6 +8,10 @@
 import socket # for UDP connection
 import struct
 
+SYN = 0x1
+ACK = 0x2
+FIN = 0x4
+
 class Client:
     def init(self, src_port, dst_addr, dst_port, segment_size):
         """
@@ -22,7 +26,8 @@ class Client:
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # Create UDP socket
         self.server_addr = (dst_addr, dst_port)
         self.segment_size = segment_size
-
+        self.seq = 0
+        self.ack = 0
         print(f"Client initialized. Ready to send to {dst_addr}:{dst_port}")
 
     def connect(self):
@@ -30,9 +35,50 @@ class Client:
         connect to the server
         blocking until the connection is established
 
-        it should support protection against segment loss/corruption/reordering 
+        it should support protection against segment loss/corruption/reordering
         """
         pass
+        # self.seq = 100
+        # syn_seg = Segment(
+        #     src_port=self.client_socket.getsockname()[1],
+        #     dst_port=self.server_addr[1],
+        #     seq=self.seq,
+        #     ack=0,
+        #     type=SYN,
+        #     window=4096,
+        #     payload=b""
+        # )
+        # self.client_socket.sendto(syn_seg.construct_raw_data(), self.server_addr)
+        # print(f"Sent SYN (seq={self.seq}) to server {self.server_addr}.")
+        #
+        # # 2) Wait for SYN+ACK from the server
+        # while True:
+        #     raw_data, addr = self.client_socket.recvfrom(65535)
+        #     rseg = Segment.extract_header(raw_data)
+        #
+        #     # Check if this is SYN+ACK
+        #     if (rseg.type & SYN) and (rseg.type & ACK):
+        #         # We can do some sanity checks here:
+        #         # e.g., if rseg.ack == self.seq + 1 to confirm it ACKed our SYN
+        #         print(f"Received SYN+ACK (seq={rseg.seq}, ack={rseg.ack}) from server {addr}.")
+        #
+        #         # 3) Send final ACK
+        #         self.seq += 1
+        #         self.ack_num = rseg.seq + 1  # Acknowledge the server's SYN
+        #         ack_seg = Segment(
+        #             src_port=self.client_socket.getsockname()[1],
+        #             dst_port=self.server_addr[1],
+        #             seq=self.seq,
+        #             ack=self.ack_num,
+        #             type=ACK,
+        #             window=4096,
+        #             payload=b""
+        #         )
+        #         self.client_socket.sendto(ack_seg.construct_raw_data(), self.server_addr)
+        #         print(f"Sent final ACK (seq={self.seq}, ack={self.ack_num}). Handshake complete!")
+        #
+        #         # We’re now “connected”
+        #         break
 
     def send(self, data):
         """
@@ -55,9 +101,12 @@ class Client:
             seg = Segment(0, self.server_addr[1], seq, 0, 0, 4096, chunk)
             date_bi = seg.construct_raw_data()
             self.client_socket.sendto(date_bi, self.server_addr)
+            seq += 1
             print(f"Sent segment: seq={seq}, payload size={len(chunk)} bytes")
-        seq += 1
 
+        end_seg = Segment(0, self.server_addr[1], seq,0, FIN, 4096, b"")
+        end_data = end_seg.construct_raw_data()
+        self.client_socket.sendto(end_data, self.server_addr)
         print("Test message finished sending to server.")
 
     def close(self):
