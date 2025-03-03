@@ -8,11 +8,25 @@
 import socket # for UDP connection
 import struct
 
+SYN = 0x1
+ACK = 0x2
 FIN = 0x4
+
+STATE_UNESTABLISHED = 0
+STATE_SYN_SENT = 1
+STATE_ESTABLISHED = 2
+STATE_LISTEN = 3
+STATE_SYN_RCVD = 4
+
 #
 # Server
 #
 class Server:
+    def __init__(self):
+        self.state = STATE_UNESTABLISHED
+        self.server_socket = None
+        self.seq = 0
+        self.ack_num = 0
     def init(self, src_port, receive_buffer_size):
         """
         initialize the server, create the UDP connection, and configure the receive buffer
@@ -24,7 +38,8 @@ class Server:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.server_socket.bind(('', src_port))
         self.receive_buffer_size = receive_buffer_size
-        print(f"Server initialized. Ready to receive on port {src_port}")
+        self.state = STATE_LISTEN
+        print(f"[Server] Listening on port {src_port}, state=LISTEN")
 
     def accept(self):
         """
@@ -36,25 +51,62 @@ class Server:
         return:
         the connection to the client 
         """
-        pass
-        # print("Waiting for a client connection...")
-        #
-        # conn = {
-        #     "client_addr": None,
-        # }
-        #
-        # while True:
-        #     data_bi, client_addr = self.server_socket.recvfrom(self.receive_buffer_size)
-        #     seg = Segment.extract_header(data_bi)
-        #
-        #     # First segment received → Store client address
-        #     if conn["client_addr"] is None:
-        #         conn["client_addr"] = client_addr
-        #         conn["buffer"] = seg.payload
-        #         print(f"Connection established with {client_addr}")
-        #         return conn
+        print("[Server] Waiting for a client connection...")
 
+        # Wait for a SYN from a client
+        while True:
+            raw_data, client_addr = self.server_socket.recvfrom(self.receive_buffer_size)
+            seg = Segment.extract_header(raw_data)
 
+            if (seg.type & SYN) and not (seg.type & ACK):
+                print(f"[Server] <-- Received SYN (seq={seg.seq}) from {client_addr}")
+                self.state = STATE_SYN_RCVD
+                self.ack_num = seg.seq + 1
+                self.seq = 1
+                # Build and send a SYN+ACK
+                synack_seg = Segment(
+                    src_port=self.server_socket.getsockname()[1],
+                    dst_port=seg.src_port,
+                    seq=self.seq,
+                    ack=self.ack_num,
+                    type=(SYN | ACK),
+                    window=4096,
+                    payload=b""
+                )
+                self.server_socket.sendto(synack_seg.construct_raw_data(), client_addr)
+                print(f"[Server] --> Sent SYN+ACK (seq={synack_seg.seq}, ack={synack_seg.ack}) to client")
+                # Now wait for the final ACK from the same client
+                while True:
+                    print("Waiting for the final ACK...")
+                    data_bi2, addr2 = self.server_socket.recvfrom(self.receive_buffer_size)
+                    print(f"the final ACK??????????")
+                    if addr2 != client_addr:
+                        print(f"[Server] Ignoring packet from unknown client {addr2}")
+                        continue
+                    seg2 = Segment.extract_header(data_bi2)
+                    # Check that it's the final ACK (and not another SYN)
+                    if (seg2.type & ACK) and not (seg2.type & SYN):
+                        if seg2.ack == self.seq + 1:
+                            print(f"[Server] <-- Received final ACK (seq={seg2.seq}, ack={seg2.ack}) from {addr2}")
+                            self.state = STATE_ESTABLISHED
+                            print(f"[Server] Connection with {client_addr} is now ESTABLISHED")
+                            # Build a connection object to store state for this client
+                            conn = {
+                                "client_addr": client_addr,
+                                "buffer": bytearray(),
+                                "state": self.state,
+                                "server_seq": self.seq,
+                                "server_ack": self.ack_num
+                            }
+                            return conn
+                        else:
+                            print(
+                                f"[Server] Received ACK with unexpected ack number {seg2.ack}; expecting {self.seq + 1}")
+                    else:
+                        print("[Server] Received an unexpected segment during handshake; ignoring.")
+
+            else:
+                print("[Server] Received non-SYN or irrelevant segment while listening; ignoring.")
 
     def receive(self, conn, length):
         """
@@ -86,6 +138,7 @@ class Server:
             #     continue
 
             try:
+                print("22222")
                 seg = Segment.extract_header(data_bi)
             except Exception as e:
                 print(f"Error parsing segment: {e}")
@@ -194,6 +247,7 @@ class Segment:
             0
         )
         checksum = Segment.simple_hash(temp_header + payload)
+        print(f"checksum: {checksum}, cksum: {cksum}")
         if checksum != cksum:
             print(f"Warning: Checksum mismatch (expected {cksum}, got {checksum})")
 
