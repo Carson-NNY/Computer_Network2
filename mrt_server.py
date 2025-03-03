@@ -129,9 +129,20 @@ class Server:
         while len(data) < length:
             try:
                 data_bi, addr = self.server_socket.recvfrom(self.receive_buffer_size)
+                # send ack
+                ack_seg = Segment(
+                    src_port=self.server_socket.getsockname()[1],
+                    dst_port=addr[1],
+                    seq=conn["server_seq"],
+                    ack=conn["server_ack"],
+                    type=ACK,
+                    window=4096,
+                    payload=b""
+                )
+                self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
             except socket.timeout:
                 print("Socket timed out – no more data received.")
-                break
+                # break
 
             # if addr != conn["client_addr"]:
             #     print(f"Received segment from unknown client {addr}, ignoring.")
