@@ -20,6 +20,18 @@ STATE_UNESTABLISHED = 0
 STATE_SYN_SENT = 1
 STATE_ESTABLISHED = 2
 
+TIME_WINDOW = 3
+
+class Timer:
+    def __init__(self):
+        self.start_time = time.time()
+
+    def reset(self):
+        self.start_time = time.time()
+
+    def check_timeout(self):
+        return time.time() - self.start_time > TIME_WINDOW
+
 ########## PLAN:
 # 1. sent data -> expect ack: (if not received, wait for timeout and resend)
 # data loss (lack of ack), detect(expect) + timer
@@ -30,10 +42,16 @@ class Client:
         self.client_socket = None
         self.server_addr = None
         self.segment_size = 0
-        self.seq = 0
+        self.seq = 0 # also treated as the next_seq_num
         self.ack_num = 0
         self.running = True
         self.send_queue = queue.Queue()  # All segments waiting to be sent
+
+        # Go-Back-N variables
+        self.send_base = 1
+        # self.next_seq_num = 1
+        self.window_size = 3
+        self.window_segments = {}
 
         self.rcv_thread = None
 
@@ -65,7 +83,7 @@ class Client:
           1) Continuously checks self.send_queue for new segments to transmit.
           2) Non-blocking receives inbound segments (e.g., ACKs, FIN, etc.) and processes them.
 
-        As you further develop, you can add:
+         further develop, you can add:
          - Retransmission timers
          - Sliding window
          - Checksum and corruption handling
@@ -76,28 +94,41 @@ class Client:
             # 这个thread只负责(including checking ACK nums of received segments, retransmitting segments when necessary, etc.)
             # 这个thread应该只是负责在ack没收到的时候timeout重发, 我们要在parent thread进行segment的发送, 但是需要对于发送的segment
             # 进行buffer 并且我们这里的thread可以访问到, 以便于在ack没收到并且timeout的时候进行重发,
-            self.send_segments()
 
-            # 2) Attempt a non-blocking recv
             self.receive_acks()
+
+
+
+            # check timeout, 现在有bug, 回头debug
+            # self.monitor_timeout()
 
             # Avoid spinning too fast. A short sleep or `select()`-based approach is typical.
             time.sleep(0.01)
 
-    def send_segments(self):
+    def monitor_timeout(self):
         """
-        Sends any segments currently in the send_queue.
-        For advanced logic, you'd track unACKed segments, implement retransmissions, etc.
+        Monitor the timeout of the segments in the window
         """
-        count = 0
-        while not self.send_queue.empty():
-            seg = self.send_queue.get_nowait()
-            raw_data = seg.construct_raw_data()
-            self.client_socket.sendto(raw_data, self.server_addr)
-            print(f"Count: {count}")
-            count += 1
-            print(
-                f"[Client Thread] Sent segment seq={seg.seq}, ack={seg.ack}, type={seg.type}, payload_len={seg.payload_length}")
+        print("check timeout: the result from check_timeout() is: ", self.window_segments[self.send_base][1].check_timeout())
+        # if self.window_segments[self.send_base][1].check_timeout():
+        #     print(f"Timeout for seq={self.send_base}, current time: {time.time()}")
+
+
+    #
+    # def send_segments(self):
+    #     """
+    #     Sends any segments currently in the send_queue.
+    #     For advanced logic, you'd track unACKed segments, implement retransmissions, etc.
+    #     """
+    #     count = 0
+    #     while not self.send_queue.empty():
+    #         seg = self.send_queue.get_nowait()
+    #         raw_data = seg.construct_raw_data()
+    #         self.client_socket.sendto(raw_data, self.server_addr)
+    #         print(f"Count: {count}")
+    #         count += 1
+    #         print(
+    #             f"[Client Thread] Sent segment seq={seg.seq}, ack={seg.ack}, type={seg.type}, payload_len={seg.payload_length}")
 
     def receive_acks(self):
         """
@@ -107,18 +138,25 @@ class Client:
         try:
             raw_data, addr = self.client_socket.recvfrom(65535)
         except BlockingIOError:
-            return  # no data available
+            return
         except OSError:
-            return  # socket possibly closed
+            return
 
-        # Parse inbound segment
         seg = Segment.extract_header(raw_data)
+        if not seg.type & ACK:
+            print("not an ACK segment")
+            return
+
+        if seg.ack == self.send_base:
+            print(f"[Client Thread] Received ACK for send_base={self.send_base}.")
+            self.send_base += 1 # move the window
+            self.window_segments.pop(seg.ack)
+            print("=======the window size: ", len(self.window_segments))
         print(
             f"[Client Thread] Received inbound segment from {addr}: seq={seg.seq}, ack={seg.ack}, type={seg.type}")
 
         # Example: If we see a FIN, we might close. Or if we see an ACK, we might update ack_num.
         # For now, just print it. Add real logic as you develop your protocol further.
-
 
 
         ############################################################################################################
@@ -220,20 +258,24 @@ class Client:
 
         bytes_sent = 0
         chunk_size =  self.segment_size - Segment.HEADER_SIZE
-        for i in range(0, len(data), chunk_size):
-            chunk = data[i:i + chunk_size]
-            seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, 0, 4096, chunk)
-            # date_bi = seg.construct_raw_data()
-            # self.client_socket.sendto(date_bi, self.server_addr)
-            self.seq += 1
-            bytes_sent += len(chunk)
-            self.send_queue.put(seg)
+        self.seq = 1  # reset seq number
+        data_sent = 0
+        while data_sent < len(data):
+            if self.seq < self.send_base + self.window_size:
+                chunk = data[data_sent:data_sent + chunk_size]
+                seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, 0, 4096, chunk)
+                self.client_socket.sendto(seg.construct_raw_data(), self.server_addr)
+                self.window_segments[self.seq] = (seg, Timer()) # store the segment in the window for waiting the ack or potential retransmission
+                data_sent += len(chunk)
+                bytes_sent += len(chunk)
+                self.seq += 1
+
 
         end_seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq,self.ack_num, FIN, 4096, b"")
-        # end_data = end_seg.construct_raw_data()
-        # self.client_socket.sendto(end_data, self.server_addr)
-        self.send_queue.put(end_seg)
-        print(f"[Client] Queued final FIN seg.")
+        end_data = end_seg.construct_raw_data()
+        self.client_socket.sendto(end_data, self.server_addr)
+        # self.send_queue.put(end_seg)
+        print(f"[Client] sent final FIN seg.")
         return bytes_sent
 
     def close(self):
