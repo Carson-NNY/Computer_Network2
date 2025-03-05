@@ -79,7 +79,7 @@ class Server:
                 while True:
                     print("Waiting for the final ACK...")
                     data_bi2, addr2 = self.server_socket.recvfrom(self.receive_buffer_size)
-                    print(f"the final ACK??????????")
+                    print(f"the final ACK")
                     if addr2 != client_addr:
                         print(f"[Server] Ignoring packet from unknown client {addr2}")
                         continue
@@ -126,20 +126,11 @@ class Server:
         self.server_socket.settimeout(20)
         data = bytearray()
         # data = bytearray(conn["buffer"])
+        count=0
         while len(data) < length:
             try:
                 data_bi, addr = self.server_socket.recvfrom(self.receive_buffer_size)
-                # send ack
-                ack_seg = Segment(
-                    src_port=self.server_socket.getsockname()[1],
-                    dst_port=addr[1],
-                    seq=conn["server_seq"],
-                    ack=conn["server_ack"],
-                    type=ACK,
-                    window=4096,
-                    payload=b""
-                )
-                self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
+
             except socket.timeout:
                 print("Socket timed out – no more data received.")
                 # break
@@ -151,6 +142,19 @@ class Server:
             try:
                 print("22222")
                 seg = Segment.extract_header(data_bi)
+                # send ack
+                ack_seg = Segment(
+                    src_port=self.server_socket.getsockname()[1],
+                    dst_port=addr[1],
+                    seq=conn["server_seq"],
+                    ack=seg.seq,
+                    type=ACK,
+                    window=4096,
+                    payload=b""
+                )
+                self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
+                print(f"test--------------: Count: {count}")
+                count += 1
             except Exception as e:
                 print(f"Error parsing segment: {e}")
                 continue
@@ -241,8 +245,8 @@ class Segment:
             cls.HEADER_CONFIG, raw_data[:cls.HEADER_SIZE]
         )
 
-        if len(raw_data) < cls.HEADER_SIZE + payload_length:
-            raise ValueError(" segment received is incomplete")
+        # if len(raw_data) < cls.HEADER_SIZE + payload_length:
+        #     raise ValueError(" segment received is incomplete")
 
         payload = raw_data[cls.HEADER_SIZE:cls.HEADER_SIZE + payload_length]
 

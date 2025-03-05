@@ -20,6 +20,10 @@ STATE_UNESTABLISHED = 0
 STATE_SYN_SENT = 1
 STATE_ESTABLISHED = 2
 
+########## PLAN:
+# 1. sent data -> expect ack: (if not received, wait for timeout and resend)
+# data loss (lack of ack), detect(expect) + timer
+
 class Client:
     def __init__(self):
         self.state = STATE_UNESTABLISHED
@@ -68,7 +72,10 @@ class Client:
          - Flow control
         """
         while self.running:
-            # 1) Send any queued segments
+            # 1) Send any queued segments, 这里我们可能需要把send_segments()拿到外面,
+            # 这个thread只负责(including checking ACK nums of received segments, retransmitting segments when necessary, etc.)
+            # 这个thread应该只是负责在ack没收到的时候timeout重发, 我们要在parent thread进行segment的发送, 但是需要对于发送的segment
+            # 进行buffer 并且我们这里的thread可以访问到, 以便于在ack没收到并且timeout的时候进行重发,
             self.send_segments()
 
             # 2) Attempt a non-blocking recv
@@ -111,8 +118,6 @@ class Client:
 
         # Example: If we see a FIN, we might close. Or if we see an ACK, we might update ack_num.
         # For now, just print it. Add real logic as you develop your protocol further.
-
-
 
 
 
@@ -240,7 +245,7 @@ class Client:
         while not self.send_queue.empty():
             print("[Client] Waiting for send queue to drain...")
             time.sleep(0.05)
-        time.sleep(30)
+        time.sleep(3)
         self.running = False
         self.client_socket.close()
         print("Client socket closed.")
