@@ -7,6 +7,7 @@
 
 import socket # for UDP connection
 import struct
+import time
 
 SYN = 0x1
 ACK = 0x2
@@ -25,8 +26,9 @@ class Server:
     def __init__(self):
         self.state = STATE_UNESTABLISHED
         self.server_socket = None
-        self.seq = 0
+        self.seq = 0 # also serves as the next expected ack number
         self.ack_num = 0
+
     def init(self, src_port, receive_buffer_size):
         """
         initialize the server, create the UDP connection, and configure the receive buffer
@@ -41,6 +43,7 @@ class Server:
         self.state = STATE_LISTEN
         print(f"[Server] Listening on port {src_port}, state=LISTEN")
 
+    # 需要后期加入防止 segment loss for handshake
     def accept(self):
         """
         accept a client request
@@ -123,10 +126,8 @@ class Server:
         return:
         data -- the bytes received from the client, guaranteed to be in its original order
         """
-        self.server_socket.settimeout(20)
         data = bytearray()
-        # data = bytearray(conn["buffer"])
-        count=0
+        self.seq = 1
         while len(data) < length:
             try:
                 data_bi, addr = self.server_socket.recvfrom(self.receive_buffer_size)
@@ -140,8 +141,25 @@ class Server:
             #     continue
 
             try:
-                print("22222")
                 seg = Segment.extract_header(data_bi)
+
+                if seg.seq < self.seq: # if smaller than expected, the ack might have been lost during transmission to client, resend it
+                    print(f"Received segment with seq number {seg.seq} smaller than expected {self.seq}, resending ack")
+                    ack_seg = Segment(
+                        src_port=self.server_socket.getsockname()[1],
+                        dst_port=addr[1],
+                        seq=conn["server_seq"],
+                        ack=seg.seq,
+                        type=ACK,
+                        window=4096,
+                        payload=b""
+                    )
+                    self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
+                    continue
+                elif seg.seq > self.seq: # ignore it if the segment with next expected seq number is lost
+                    print(f"Received segment with unexpected seq number {seg.seq}; expecting {self.seq}, dropping this")
+                    continue
+
                 # send ack
                 ack_seg = Segment(
                     src_port=self.server_socket.getsockname()[1],
@@ -152,9 +170,12 @@ class Server:
                     window=4096,
                     payload=b""
                 )
+
+                # if seg.seq == 3:
+                #     print("reach seq 3, intentionally wait for timeout")
+                #     time.sleep(4)
                 self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
-                print(f"test--------------: Count: {count}")
-                count += 1
+                self.seq += 1
             except Exception as e:
                 print(f"Error parsing segment: {e}")
                 continue
@@ -164,10 +185,9 @@ class Server:
                 break
 
             print(f"=============================Received segment: seq={seg.seq}, size={len(seg.payload)}")
-            print(f"  payload: {seg.payload}")
+            # print(f"  payload: {seg.payload}")
 
             data.extend(seg.payload)
-        self.server_socket.settimeout(None)
         return bytes(data)
 
     def close(self):

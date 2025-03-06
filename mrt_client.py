@@ -20,7 +20,7 @@ STATE_UNESTABLISHED = 0
 STATE_SYN_SENT = 1
 STATE_ESTABLISHED = 2
 
-TIME_WINDOW = 3
+TIME_WINDOW = 2
 
 class Timer:
     def __init__(self):
@@ -97,38 +97,23 @@ class Client:
 
             self.receive_acks()
 
+            # check timeout
+            self.monitor_timeout()
 
-
-            # check timeout, 现在有bug, 回头debug
-            # self.monitor_timeout()
-
-            # Avoid spinning too fast. A short sleep or `select()`-based approach is typical.
-            time.sleep(0.01)
+            # Avoid spinning too fast
+            time.sleep(0.001)
 
     def monitor_timeout(self):
         """
         Monitor the timeout of the segments in the window
         """
-        print("check timeout: the result from check_timeout() is: ", self.window_segments[self.send_base][1].check_timeout())
-        # if self.window_segments[self.send_base][1].check_timeout():
-        #     print(f"Timeout for seq={self.send_base}, current time: {time.time()}")
-
-
-    #
-    # def send_segments(self):
-    #     """
-    #     Sends any segments currently in the send_queue.
-    #     For advanced logic, you'd track unACKed segments, implement retransmissions, etc.
-    #     """
-    #     count = 0
-    #     while not self.send_queue.empty():
-    #         seg = self.send_queue.get_nowait()
-    #         raw_data = seg.construct_raw_data()
-    #         self.client_socket.sendto(raw_data, self.server_addr)
-    #         print(f"Count: {count}")
-    #         count += 1
-    #         print(
-    #             f"[Client Thread] Sent segment seq={seg.seq}, ack={seg.ack}, type={seg.type}, payload_len={seg.payload_length}")
+        if len(self.window_segments) == 0:
+            return
+        if self.window_segments[self.send_base][1].check_timeout():
+            print(f"Timeout for seq={self.send_base}, current time: {time.time()}, retransmitting segment....")
+            # retransmit the segment
+            self.client_socket.sendto(self.window_segments[self.send_base][0].construct_raw_data(), self.server_addr)
+            self.window_segments[self.send_base][1].reset()
 
     def receive_acks(self):
         """
@@ -148,15 +133,18 @@ class Client:
             return
 
         if seg.ack == self.send_base:
+            # later we can make it accept the acks for the segments in the window, to handle out of order acks但是不影响我们文件的发送
+            # 需要在这里进行缓存下那些window中但不是send_base的segment的acks, 然后在这里进行ack的处理
+
+            # 目前只监听send_base的ack, 其余的ignore
             print(f"[Client Thread] Received ACK for send_base={self.send_base}.")
             self.send_base += 1 # move the window
             self.window_segments.pop(seg.ack)
-            print("=======the window size: ", len(self.window_segments))
+        else:
+            print(f"[Client Thread] Received ACK not in window, ignoring for now(需要改变later)")
         print(
             f"[Client Thread] Received inbound segment from {addr}: seq={seg.seq}, ack={seg.ack}, type={seg.type}")
 
-        # Example: If we see a FIN, we might close. Or if we see an ACK, we might update ack_num.
-        # For now, just print it. Add real logic as you develop your protocol further.
 
 
         ############################################################################################################
@@ -262,6 +250,17 @@ class Client:
         data_sent = 0
         while data_sent < len(data):
             if self.seq < self.send_base + self.window_size:
+                print("self.seq: ", self.seq )
+                # if self.seq == 2: # for testing, not send seq 2
+                #     print("skip seq 2!!!!!! for testing")
+                #     chunk = data[data_sent:data_sent + chunk_size]
+                #     seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, 0,4096, chunk)
+                #     self.window_segments[self.seq] = (seg, Timer())
+                #     self.seq += 1
+                #     data_sent += len(chunk)
+                #     bytes_sent += len(chunk)
+                #     continue
+
                 chunk = data[data_sent:data_sent + chunk_size]
                 seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, 0, 4096, chunk)
                 self.client_socket.sendto(seg.construct_raw_data(), self.server_addr)
