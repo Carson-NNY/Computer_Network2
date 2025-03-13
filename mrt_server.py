@@ -87,6 +87,7 @@ class Server:
                         print(f"[Server] Ignoring packet from unknown client {addr2}")
                         continue
                     seg2 = Segment.extract_header(data_bi2)
+
                     # Check that it's the final ACK (and not another SYN)
                     if (seg2.type & ACK) and not (seg2.type & SYN):
                         if seg2.ack == self.seq + 1:

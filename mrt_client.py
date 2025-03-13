@@ -11,7 +11,6 @@ import time
 import struct
 import threading
 
-
 SYN = 0x1
 ACK = 0x2
 FIN = 0x4
@@ -47,7 +46,7 @@ class Client:
         self.running = True
         self.send_queue = queue.Queue()  # All segments waiting to be sent
 
-        # Go-Back-N variables
+        # Go-Back-N
         self.send_base = 1
         # self.next_seq_num = 1
         self.window_size = 3
@@ -73,25 +72,24 @@ class Client:
         print(f"[Client] Initialized on port {src_port}, non-blocking socket set.")
 
         # Spawn the rcv_and_sgmnt_handler in a daemon thread
-        self.rcv_thread = threading.Thread(target=self.rcv_and_sgmnt_handler, daemon=True)
-        self.rcv_thread.start()
+        # self.rcv_thread = threading.Thread(target=self.rcv_and_sgmnt_handler, daemon=True)
+        # self.rcv_thread.start()
 
 
     def rcv_and_sgmnt_handler(self):
         """
         Single child thread that:
-          1) Continuously checks self.send_queue for new segments to transmit.
           2) Non-blocking receives inbound segments (e.g., ACKs, FIN, etc.) and processes them.
 
-         further develop, you can add:
+         further develop:
          - Retransmission timers
          - Sliding window
          - Checksum and corruption handling
          - Flow control
         """
+
         while self.running:
-            # 1) Send any queued segments, 这里我们可能需要把send_segments()拿到外面,
-            # 这个thread只负责(including checking ACK nums of received segments, retransmitting segments when necessary, etc.)
+            # 这个thread只负责 receiving ACK nums of sent segments, retransmitting segments when timeout, etc.)
             # 这个thread应该只是负责在ack没收到的时候timeout重发, 我们要在parent thread进行segment的发送, 但是需要对于发送的segment
             # 进行buffer 并且我们这里的thread可以访问到, 以便于在ack没收到并且timeout的时候进行重发,
 
@@ -101,7 +99,7 @@ class Client:
             self.monitor_timeout()
 
             # Avoid spinning too fast
-            time.sleep(0.001)
+            # time.sleep(0.001)
 
     def monitor_timeout(self):
         """
@@ -114,6 +112,18 @@ class Client:
             # retransmit the segment
             self.client_socket.sendto(self.window_segments[self.send_base][0].construct_raw_data(), self.server_addr)
             self.window_segments[self.send_base][1].reset()
+
+    def monitor_timeout_helper(self, seq):
+        """
+        Monitor the timeout of the segments in the window
+        """
+        if len(self.window_segments) == 0:
+            return
+        if self.window_segments[seq][1].check_timeout():
+            print(f"Timeout for seq={seq}, current time: {time.time()}, retransmitting segment....")
+            # retransmit the segment
+            self.client_socket.sendto(self.window_segments[seq][0].construct_raw_data(), self.server_addr)
+            self.window_segments[seq][1].reset()
 
     def receive_acks(self):
         """
@@ -141,6 +151,7 @@ class Client:
             self.send_base += 1 # move the window
             self.window_segments.pop(seg.ack)
         else:
+            print(f"seg.ack: {seg.ack}, self.send_base: {self.send_base}")
             print(f"[Client Thread] Received ACK not in window, ignoring for now(需要改变later)")
         print(
             f"[Client Thread] Received inbound segment from {addr}: seq={seg.seq}, ack={seg.ack}, type={seg.type}")
@@ -175,6 +186,8 @@ class Client:
         # Temporarily set socket to blocking for handshake
         self.client_socket.setblocking(True)
 
+        # 我们需要对data loss during handshake进行处理
+
         self.seq = 1
         # Send SYN
         syn_seg = Segment(
@@ -187,10 +200,13 @@ class Client:
             payload=b""
         )
         self.client_socket.sendto(syn_seg.construct_raw_data(), self.server_addr)
+        self.window_segments[self.seq] = (syn_seg, Timer())
         print(f"[Client] Sent SYN (seq={self.seq}) to server.")
 
         # Wait for SYN+ACK from the server (blocking)
         while True:
+            self.monitor_timeout_helper(self.seq)
+
             raw_data, addr = self.client_socket.recvfrom(65535)
             if addr != self.server_addr:
                 print(f"[Client] Ignoring packet from unknown address: {addr}")
@@ -199,6 +215,7 @@ class Client:
             seg1 = Segment.extract_header(raw_data)
             if (seg1.type & SYN) and (seg1.type & ACK):
                 if seg1.ack == self.seq + 1:
+                    self.window_segments.pop(self.seq)
                     print(f"[Client] Received SYN+ACK (seq={seg1.seq}, ack={seg1.ack})")
                     break
                 else:
@@ -218,13 +235,32 @@ class Client:
             window=4096,
             payload=b""
         )
+
         self.client_socket.sendto(final_ack.construct_raw_data(), self.server_addr)
+        self.window_segments[self.seq] = (final_ack, Timer())
         print(f"[Client] Sent final ACK (seq={self.seq}, ack={self.ack_num}).")
+
+        while True:
+            self.monitor_timeout_helper(self.seq)
+
+            raw_data, addr = self.client_socket.recvfrom(65535)
+
+            seg2 = Segment.extract_header(raw_data)
+            if (seg2.type & ACK) and seg2.ack == self.seq:
+                self.window_segments.pop(self.seq)
+                print(f"[Client] Received final ACK (seq={seg2.seq}, ack={seg2.ack}). Handshake complete.")
+                break
+            else:
+                print(f"[Client] Received unexpected segment during handshake, ignoring.")
         self.state = STATE_ESTABLISHED
 
         # Revert socket to non-blocking mode for normal operation
         self.client_socket.setblocking(False)
         print("[Client] Handshake complete. Socket set to non-blocking mode, state=ESTABLISHED.")
+
+        # Start the rcv_and_sgmnt_handler thread
+        self.rcv_thread = threading.Thread(target=self.rcv_and_sgmnt_handler, daemon=True)
+        self.rcv_thread.start()
 
 
     def send(self, data):
@@ -283,9 +319,9 @@ class Client:
         blocking until the connection is closed
         """
 
-        while not self.send_queue.empty():
-            print("[Client] Waiting for send queue to drain...")
-            time.sleep(0.05)
+        # while not self.send_queue.empty():
+        #     print("[Client] Waiting for send queue to drain...")
+        #     time.sleep(0.05)
         time.sleep(3)
         self.running = False
         self.client_socket.close()
