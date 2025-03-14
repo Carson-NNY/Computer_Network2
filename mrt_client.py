@@ -6,7 +6,6 @@
 #
 
 import socket # for UDP connection
-import queue
 import time
 import struct
 import threading
@@ -20,7 +19,7 @@ STATE_UNESTABLISHED = 0
 STATE_SYN_SENT = 1
 STATE_ESTABLISHED = 2
 
-TIME_WINDOW = 2
+TIME_WINDOW = 1
 
 class Timer:
     def __init__(self):
@@ -45,7 +44,6 @@ class Client:
         self.seq = 0 # also treated as the next_seq_num
         self.ack_num = 0
         self.running = True
-        self.send_queue = queue.Queue()  # All segments waiting to be sent
 
         # Go-Back-N variables
         self.send_base = 1
@@ -75,13 +73,13 @@ class Client:
 
 
 
+
     def rcv_and_sgmnt_handler(self):
         """
         Single child thread that:
-          1) Continuously checks self.send_queue for new segments to transmit.
           2) Non-blocking receives inbound segments (e.g., ACKs, FIN, etc.) and processes them.
 
-         further develop, you can add:
+         further develop, add:
          - Retransmission timers
          - Sliding window
          - Checksum and corruption handling
@@ -145,6 +143,7 @@ class Client:
 
 
 
+
         ############################################################################################################
 
         # client-side:
@@ -162,6 +161,15 @@ class Client:
 
         ############################################################################################################
 
+
+    def construct_segment_and_send(self, src_port, dst_port, seq, ack, type, window, payload):
+        """
+        Construct a segment and send it to the server
+        """
+        seg = Segment(src_port, dst_port, seq, ack, type, window, payload)
+        self.client_socket.sendto(seg.construct_raw_data(), self.server_addr)
+        return seg
+
     def connect(self):
         """
         connect to the server
@@ -174,17 +182,8 @@ class Client:
         self.client_socket.setblocking(True)
 
         self.seq = 1
-        # Send SYN
-        syn_seg = Segment(
-            src_port=self.client_socket.getsockname()[1],
-            dst_port=self.server_addr[1],
-            seq=self.seq,
-            ack=0,
-            type=SYN,
-            window=4096,
-            payload=b""
-        )
-        self.client_socket.sendto(syn_seg.construct_raw_data(), self.server_addr)
+
+        syn_seg = self.construct_segment_and_send(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, 0, SYN, 4096, b"")
         print(f"[Client] Sent SYN (seq={self.seq}) to server.")
 
         # Wait for SYN+ACK from the server (blocking)
@@ -196,9 +195,6 @@ class Client:
                 print("[Client] resend syn_seg.")
                 self.client_socket.sendto(syn_seg.construct_raw_data(), self.server_addr)
                 continue
-            # if addr != self.server_addr:
-            #     print(f"[Client] Ignoring packet from unknown address: {addr}")
-            #     continue
 
             seg1 = Segment.extract_header(raw_data)
             if (seg1.type & SYN) and (seg1.type & ACK):
@@ -213,16 +209,7 @@ class Client:
         # Send final ACK
         self.seq += 1
         self.ack_num = seg1.seq + 1
-        final_ack = Segment(
-            src_port=self.client_socket.getsockname()[1],
-            dst_port=self.server_addr[1],
-            seq=self.seq,
-            ack=self.ack_num,
-            type=ACK,
-            window=4096,
-            payload=b""
-        )
-        self.client_socket.sendto(final_ack.construct_raw_data(), self.server_addr)
+        final_ack = self.construct_segment_and_send(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, ACK, 4096, b"")
         self.window_segments[self.seq] = (final_ack, Timer())
         print(f"[Client] Sent final ACK (seq={self.seq}, ack={self.ack_num}).")
         self.state = STATE_ESTABLISHED
@@ -231,7 +218,7 @@ class Client:
         self.client_socket.setblocking(False)
         self.client_socket.settimeout(0.5)
 
-        #  in case the Final Ack is lost and the server resend the SYN+ACK, we need to check here: wait for the ack confirmation of the final ACK from server
+        #  if the Final Ack is lost and the server resend the SYN+ACK, we need to check here: wait for the ack confirmation of the final ACK from server
         while True:
             try:
                 raw_data, addr = self.client_socket.recvfrom(65535)
@@ -272,19 +259,9 @@ class Client:
         while data_sent < len(data):
             if self.seq < self.send_base + self.window_size:
                 print("self.seq: ", self.seq )
-                # if self.seq == 2: # for testing, not send seq 2
-                #     print("skip seq 2!!!!!! for testing")
-                #     chunk = data[data_sent:data_sent + chunk_size]
-                #     seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, 0,4096, chunk)
-                #     self.window_segments[self.seq] = (seg, Timer())
-                #     self.seq += 1
-                #     data_sent += len(chunk)
-                #     bytes_sent += len(chunk)
-                #     continue
 
                 chunk = data[data_sent:data_sent + chunk_size]
-                seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, 0, 4096, chunk)
-                self.client_socket.sendto(seg.construct_raw_data(), self.server_addr)
+                seg = self.construct_segment_and_send(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, 0, 4096, chunk)
                 self.window_segments[self.seq] = (seg, Timer()) # store the segment in the window for waiting the ack or potential retransmission
                 data_sent += len(chunk)
                 bytes_sent += len(chunk)
@@ -309,10 +286,7 @@ class Client:
         blocking until the connection is closed
         """
 
-        while not self.send_queue.empty():
-            print("[Client] Waiting for send queue to drain...")
-            time.sleep(0.05)
-        time.sleep(3)
+        time.sleep(4)
         self.running = False
         self.client_socket.close()
         print("Client socket closed.")
