@@ -58,7 +58,7 @@ class Server:
 
         # Wait for a SYN from a client
         while True:
-            raw_data, client_addr = self.server_socket.recvfrom(self.receive_buffer_size)
+            raw_data, client_addr = self.server_socket.recvfrom(self.receive_buffer_size) # we have timer on the client so it does not need to set timeout
             seg = Segment.extract_header(raw_data)
 
             if (seg.type & SYN) and not (seg.type & ACK):
@@ -78,11 +78,18 @@ class Server:
                 )
                 self.server_socket.sendto(synack_seg.construct_raw_data(), client_addr)
                 print(f"[Server] --> Sent SYN+ACK (seq={synack_seg.seq}, ack={synack_seg.ack}) to client")
-                # Now wait for the final ACK from the same client
+
+                self.server_socket.settimeout(0.5) # set timeout for the final ACK
+                # Now wait for the final ACK from the  client
                 while True:
                     print("Waiting for the final ACK...")
-                    data_bi2, addr2 = self.server_socket.recvfrom(self.receive_buffer_size)
-                    print(f"the final ACK")
+                    try:
+                        data_bi2, addr2 = self.server_socket.recvfrom(self.receive_buffer_size)
+                    except socket.timeout:
+                        print("Waiting for the final ACK timeout, resending SYN+ACK")
+                        self.server_socket.sendto(synack_seg.construct_raw_data(), client_addr)
+                        continue
+
                     if addr2 != client_addr:
                         print(f"[Server] Ignoring packet from unknown client {addr2}")
                         continue
@@ -93,6 +100,7 @@ class Server:
                             print(f"[Server] <-- Received final ACK (seq={seg2.seq}, ack={seg2.ack}) from {addr2}")
                             self.state = STATE_ESTABLISHED
                             print(f"[Server] Connection with {client_addr} is now ESTABLISHED")
+                            self.server_socket.settimeout(None)
                             # Build a connection object to store state for this client
                             conn = {
                                 "client_addr": client_addr,
@@ -107,6 +115,8 @@ class Server:
                                 f"[Server] Received ACK with unexpected ack number {seg2.ack}; expecting {self.seq + 1}")
                     else:
                         print("[Server] Received an unexpected segment during handshake; ignoring.")
+                        print("resending SYN+ACK")
+                        self.server_socket.sendto(synack_seg.construct_raw_data(), client_addr)
 
             else:
                 print("[Server] Received non-SYN or irrelevant segment while listening; ignoring.")

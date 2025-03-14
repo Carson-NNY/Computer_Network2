@@ -141,7 +141,7 @@ class Client:
         else:
             print(f"[Client Thread] Received ACK not in window, ignoring for now(需要改变later)")
         print(
-            f"[Client Thread] Received inbound segment from {addr}: seq={seg.seq}, ack={seg.ack}, type={seg.type}")
+            f"[Client Thread] Received segment: seq={seg.seq}, ack={seg.ack}, type={seg.type}")
 
 
 
@@ -188,8 +188,14 @@ class Client:
         print(f"[Client] Sent SYN (seq={self.seq}) to server.")
 
         # Wait for SYN+ACK from the server (blocking)
+        self.client_socket.settimeout(1)
         while True:
-            raw_data, addr = self.client_socket.recvfrom(65535)
+            try:
+                raw_data, addr = self.client_socket.recvfrom(65535)
+            except socket.timeout:
+                print("[Client] resend syn_seg.")
+                self.client_socket.sendto(syn_seg.construct_raw_data(), self.server_addr)
+                continue
             if addr != self.server_addr:
                 print(f"[Client] Ignoring packet from unknown address: {addr}")
                 continue
@@ -217,13 +223,25 @@ class Client:
             payload=b""
         )
         self.client_socket.sendto(final_ack.construct_raw_data(), self.server_addr)
+        self.window_segments[self.seq] = (final_ack, Timer())
         print(f"[Client] Sent final ACK (seq={self.seq}, ack={self.ack_num}).")
         self.state = STATE_ESTABLISHED
 
         # Revert socket to non-blocking mode for normal operation
         self.client_socket.setblocking(False)
-        print("[Client] Handshake complete. Socket set to non-blocking mode, state=ESTABLISHED.")
+        self.client_socket.settimeout(2)
+        while True:
+            try:
+                raw_data, addr = self.client_socket.recvfrom(65535)
+                seg1 = Segment.extract_header(raw_data)
+                if (seg1.type & SYN) and (seg1.type & ACK):
+                    print("resend final ACK")
+                    self.client_socket.sendto(final_ack.construct_raw_data(), self.server_addr)
+            except socket.timeout:
+                self.client_socket.settimeout(0.5)
+                break # tolerate time for the handshake (3 seconds)
 
+        print("[Client] Handshake complete. Socket set to non-blocking mode, state=ESTABLISHED.")
         # Spawn the rcv_and_sgmnt_handler in a daemon thread
         self.rcv_thread = threading.Thread(target=self.rcv_and_sgmnt_handler, daemon=True)
         self.rcv_thread.start()
