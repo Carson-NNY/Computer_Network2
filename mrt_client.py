@@ -72,9 +72,7 @@ class Client:
         self.client_socket.setblocking(False)
         print(f"[Client] Initialized on port {src_port}, non-blocking socket set.")
 
-        # Spawn the rcv_and_sgmnt_handler in a daemon thread
-        self.rcv_thread = threading.Thread(target=self.rcv_and_sgmnt_handler, daemon=True)
-        self.rcv_thread.start()
+
 
 
     def rcv_and_sgmnt_handler(self):
@@ -101,7 +99,7 @@ class Client:
             self.monitor_timeout()
 
             # Avoid spinning too fast
-            time.sleep(0.001)
+            # time.sleep(0.001)
 
     def monitor_timeout(self):
         """
@@ -226,6 +224,9 @@ class Client:
         self.client_socket.setblocking(False)
         print("[Client] Handshake complete. Socket set to non-blocking mode, state=ESTABLISHED.")
 
+        # Spawn the rcv_and_sgmnt_handler in a daemon thread
+        self.rcv_thread = threading.Thread(target=self.rcv_and_sgmnt_handler, daemon=True)
+        self.rcv_thread.start()
 
     def send(self, data):
         """
@@ -273,8 +274,13 @@ class Client:
         end_seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq,self.ack_num, FIN, 4096, b"")
         end_data = end_seg.construct_raw_data()
         self.client_socket.sendto(end_data, self.server_addr)
-        # self.send_queue.put(end_seg)
+        # self.window_segments[self.seq] = (end_data, Timer())
         print(f"[Client] sent final FIN seg.")
+
+        while len(self.window_segments) > 0:
+            time.sleep(0.15)
+            print(f"[Client] Waiting for all segments to be acknowledged...")
+
         return bytes_sent
 
     def close(self):
