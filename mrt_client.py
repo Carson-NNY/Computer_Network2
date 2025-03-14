@@ -139,7 +139,7 @@ class Client:
             self.send_base += 1 # move the window
             self.window_segments.pop(seg.ack)
         else:
-            print(f"[Client Thread] Received ACK not in window, ignoring for now(需要改变later)")
+            print(f"[Client Thread] Received ACK not == self.send_base: ack{seg.ack} self.send_base={self.send_base}, ignoring for now(需要改变later)")
         print(
             f"[Client Thread] Received segment: seq={seg.seq}, ack={seg.ack}, type={seg.type}")
 
@@ -196,9 +196,9 @@ class Client:
                 print("[Client] resend syn_seg.")
                 self.client_socket.sendto(syn_seg.construct_raw_data(), self.server_addr)
                 continue
-            if addr != self.server_addr:
-                print(f"[Client] Ignoring packet from unknown address: {addr}")
-                continue
+            # if addr != self.server_addr:
+            #     print(f"[Client] Ignoring packet from unknown address: {addr}")
+            #     continue
 
             seg1 = Segment.extract_header(raw_data)
             if (seg1.type & SYN) and (seg1.type & ACK):
@@ -229,17 +229,22 @@ class Client:
 
         # Revert socket to non-blocking mode for normal operation
         self.client_socket.setblocking(False)
-        self.client_socket.settimeout(2)
+        self.client_socket.settimeout(0.5)
+
+        #  in case the Final Ack is lost and the server resend the SYN+ACK, we need to check here: wait for the ack confirmation of the final ACK from server
         while True:
             try:
                 raw_data, addr = self.client_socket.recvfrom(65535)
                 seg1 = Segment.extract_header(raw_data)
-                if (seg1.type & SYN) and (seg1.type & ACK):
+                if (seg1.type & SYN) and (seg1.type & ACK): # request from the server due to possible lost final ACK
                     print("resend final ACK")
                     self.client_socket.sendto(final_ack.construct_raw_data(), self.server_addr)
-            except socket.timeout:
-                self.client_socket.settimeout(0.5)
-                break # tolerate time for the handshake (3 seconds)
+                elif seg1.type & ACK: # received the final ACK confirmation from server
+                    print("received final ACK from server")
+                    break
+            except socket.timeout:  # the final ACK confirmation from server is lost, resend the final ACK
+                self.client_socket.sendto(final_ack.construct_raw_data(), self.server_addr)
+                print("timeout, resend final ACK")
 
         print("[Client] Handshake complete. Socket set to non-blocking mode, state=ESTABLISHED.")
         # Spawn the rcv_and_sgmnt_handler in a daemon thread
@@ -259,9 +264,6 @@ class Client:
 
         if not isinstance(data, bytes):
             data = data.encode()
-        if self.state != STATE_ESTABLISHED:
-            print("Connection not established.")
-            return
 
         bytes_sent = 0
         chunk_size =  self.segment_size - Segment.HEADER_SIZE

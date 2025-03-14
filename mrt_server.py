@@ -153,6 +153,21 @@ class Server:
             try:
                 seg = Segment.extract_header(data_bi)
 
+                # if seg.type & ACK is true,  the client lost the server's confirmation of the final ack, resend it
+                if seg.type & ACK:
+                    print(f"Received ACK segment with seq number {seg.seq}, resending final ack")
+                    ack_seg = Segment(
+                        src_port=self.server_socket.getsockname()[1],
+                        dst_port=addr[1],
+                        seq=conn["server_seq"],
+                        ack=conn["server_ack"],
+                        type=ACK,
+                        window=4096,
+                        payload=b""
+                    )
+                    self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
+                    continue
+
                 if seg.seq < self.seq: # if smaller than expected, the ack might have been lost during transmission to client, resend it
                     print(f"Received segment with seq number {seg.seq} smaller than expected {self.seq}, resending ack")
                     ack_seg = Segment(
@@ -181,9 +196,6 @@ class Server:
                     payload=b""
                 )
 
-                # if seg.seq == 3:
-                #     print("reach seq 3, intentionally wait for timeout")
-                #     time.sleep(4)
                 self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
                 self.seq += 1
             except Exception as e:
@@ -195,7 +207,6 @@ class Server:
                 break
 
             print(f"=============================Received segment: seq={seg.seq}, size={len(seg.payload)}")
-            # print(f"  payload: {seg.payload}")
 
             data.extend(seg.payload)
         return bytes(data)
