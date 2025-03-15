@@ -161,16 +161,16 @@ class Server:
                 self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], conn["server_ack"], ACK, 4096, b"", addr)
                 continue
 
-            if seg.seq < self.seq: # if smaller than expected, the ack might have been lost during transmission to client, resend it
-                print(f"Received segment with seq number {seg.seq} smaller than expected {self.seq}, resending ack")
-                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], seg.seq, ACK, 4096, b"", addr)
+            # got in-order seg
+            if seg.seq == self.seq:
+                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"],
+                                                seg.seq, ACK, 4096, b"", addr)
+                self.seq += 1
+            else: # two cases: 1. seg.seq < self.seq when the client lost the server's ack  2. seg.seq > self.seq when the client lost the packet with those lost seq number.
+                print(f"Received segment with unexpected larger seq number {seg.seq}; expecting {self.seq}, now re-sending ACK for the last in-order segment: ( resend the lost server's ack ///// do Fast-Transmission work, resend the ack for the highest accumulated seq number)")
+                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"],
+                                            self.seq - 1, ACK, 4096, b"", addr)
                 continue
-            elif seg.seq > self.seq: # ignore it if the segment with next expected seq number is lost
-                print(f"Received segment with unexpected seq number {seg.seq}; expecting {self.seq}, dropping this")
-                continue
-
-            self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], seg.seq, ACK, 4096, b"", addr)
-            self.seq += 1
 
             if seg.type & FIN:
                 print("FIN segment received. Ending.....")

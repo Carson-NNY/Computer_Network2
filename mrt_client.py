@@ -48,7 +48,7 @@ class Client:
         # Go-Back-N variables
         self.send_base = 1
         # self.next_seq_num = 1
-        self.window_size = 3
+        self.window_size = 5
         self.window_segments = {}
 
         self.rcv_thread = None
@@ -69,9 +69,6 @@ class Client:
         self.segment_size = segment_size
         self.client_socket.setblocking(False)
         print(f"[Client] Initialized on port {src_port}, non-blocking socket set.")
-
-
-
 
 
     def rcv_and_sgmnt_handler(self):
@@ -128,20 +125,21 @@ class Client:
             print("not an ACK segment")
             return
 
-        if seg.ack == self.send_base:
+        if seg.ack >= self.send_base:
             # later we can make it accept the acks for the segments in the window, to handle out of order acks但是不影响我们文件的发送
             # 需要在这里进行缓存下那些window中但不是send_base的segment的acks, 然后在这里进行ack的处理
 
-            # 目前只监听send_base的ack, 其余的ignore
-            print(f"[Client Thread] Received ACK for send_base={self.send_base}.")
-            self.send_base += 1 # move the window
-            self.window_segments.pop(seg.ack)
+            print(f"[Client Thread] Received ACK for seg.ack={seg.ack}, self.send_base={self.send_base}, we move the window by { 1 + seg.ack - self.send_base}.")
+            gap = 1 + seg.ack - self.send_base
+            self.send_base += gap  # move the window
+            while gap > 0:
+                self.window_segments.pop(self.send_base - gap, None)
+                gap -= 1
+
         else:
-            print(f"[Client Thread] Received ACK not == self.send_base: ack{seg.ack} self.send_base={self.send_base}, ignoring for now(需要改变later)")
+            print(f"[Client Thread] Received ACK != self.send_base: ack {seg.ack} self.send_base={self.send_base}, ignoring for now(需要改变later)")
         print(
             f"[Client Thread] Received segment: seq={seg.seq}, ack={seg.ack}, type={seg.type}")
-
-
 
 
         ############################################################################################################
