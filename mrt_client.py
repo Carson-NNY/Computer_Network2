@@ -351,8 +351,6 @@ class Segment:
         """
         Parse raw bytes into a Segment object.
         """
-        if len(raw_data) < cls.HEADER_SIZE:
-            raise ValueError("raw data is corrupted")
 
         (src_port, dst_port, seq, ack, type, window, payload_length, cksum) = struct.unpack(
             cls.HEADER_CONFIG, raw_data[:cls.HEADER_SIZE]

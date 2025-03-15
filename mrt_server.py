@@ -148,34 +148,29 @@ class Server:
         while len(data) < length:
             try:
                 data_bi, addr = self.server_socket.recvfrom(self.receive_buffer_size)
-
             except socket.timeout:
                 print("Socket timed out – no more data received.")
 
-            try:
-                seg = Segment.extract_header(data_bi)
-                if self.is_corrupted(seg):
-                    continue
-
-                # if seg.type & ACK is true,  the client lost the server's confirmation of the final ack, resend it
-                if seg.type & ACK:
-                    print(f"Received ACK segment with seq number {seg.seq}, resending final ack")
-                    self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], conn["server_ack"], ACK, 4096, b"", addr)
-                    continue
-
-                if seg.seq < self.seq: # if smaller than expected, the ack might have been lost during transmission to client, resend it
-                    print(f"Received segment with seq number {seg.seq} smaller than expected {self.seq}, resending ack")
-                    self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], seg.seq, ACK, 4096, b"", addr)
-                    continue
-                elif seg.seq > self.seq: # ignore it if the segment with next expected seq number is lost
-                    print(f"Received segment with unexpected seq number {seg.seq}; expecting {self.seq}, dropping this")
-                    continue
-
-                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], seg.seq, ACK, 4096, b"", addr)
-                self.seq += 1
-            except Exception as e:
-                print(f"Error parsing segment: {e}")
+            seg = Segment.extract_header(data_bi)
+            if self.is_corrupted(seg):
                 continue
+
+            # if seg.type & ACK is true,  the client lost the server's confirmation of the final ack, resend it
+            if seg.type & ACK:
+                print(f"Received ACK segment with seq number {seg.seq}, resending final ack")
+                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], conn["server_ack"], ACK, 4096, b"", addr)
+                continue
+
+            if seg.seq < self.seq: # if smaller than expected, the ack might have been lost during transmission to client, resend it
+                print(f"Received segment with seq number {seg.seq} smaller than expected {self.seq}, resending ack")
+                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], seg.seq, ACK, 4096, b"", addr)
+                continue
+            elif seg.seq > self.seq: # ignore it if the segment with next expected seq number is lost
+                print(f"Received segment with unexpected seq number {seg.seq}; expecting {self.seq}, dropping this")
+                continue
+
+            self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], seg.seq, ACK, 4096, b"", addr)
+            self.seq += 1
 
             if seg.type & FIN:
                 print("FIN segment received. Ending.....")
@@ -253,8 +248,6 @@ class Segment:
         """
         Parse raw bytes into a Segment object.
         """
-        if len(raw_data) < cls.HEADER_SIZE:
-            raise ValueError("raw data is corrupted")
 
         (src_port, dst_port, seq, ack, type, window, payload_length, cksum) = struct.unpack(
             cls.HEADER_CONFIG, raw_data[:cls.HEADER_SIZE]
