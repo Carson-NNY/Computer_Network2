@@ -43,6 +43,12 @@ class Server:
         self.state = STATE_LISTEN
         print(f"[Server] Listening on port {src_port}, state=LISTEN")
 
+    def is_corrupted(self, seg):
+        if seg is None:
+            print("Received a corrupted segment, ignoring...")
+            return True
+        return False
+
     # 需要后期加入防止 segment loss for handshake
     def accept(self):
         """
@@ -60,6 +66,8 @@ class Server:
         while True:
             raw_data, client_addr = self.server_socket.recvfrom(self.receive_buffer_size) # we have timer on the client so it does not need to set timeout
             seg = Segment.extract_header(raw_data)
+            if self.is_corrupted(seg):
+                continue
 
             if (seg.type & SYN) and not (seg.type & ACK):
                 print(f"[Server] <-- Received SYN (seq={seg.seq}) from {client_addr}")
@@ -90,10 +98,10 @@ class Server:
                         self.server_socket.sendto(synack_seg.construct_raw_data(), client_addr)
                         continue
 
-                    if addr2 != client_addr:
-                        print(f"[Server] Ignoring packet from unknown client {addr2}")
-                        continue
                     seg2 = Segment.extract_header(data_bi2)
+                    if seg2 is None:
+                        print("Received a corrupted segment, ignoring...")
+                        continue
                     # Check that it's the final ACK (and not another SYN)
                     if (seg2.type & ACK) and not (seg2.type & SYN):
                         if seg2.ack == self.seq + 1:
@@ -144,14 +152,12 @@ class Server:
 
             except socket.timeout:
                 print("Socket timed out – no more data received.")
-                # break
 
-            # if addr != conn["client_addr"]:
-            #     print(f"Received segment from unknown client {addr}, ignoring.")
-            #     continue
 
             try:
                 seg = Segment.extract_header(data_bi)
+                if self.is_corrupted(seg):
+                    continue
 
                 # if seg.type & ACK is true,  the client lost the server's confirmation of the final ack, resend it
                 if seg.type & ACK:
@@ -305,7 +311,8 @@ class Segment:
         checksum = Segment.simple_hash(temp_header + payload)
         print(f"checksum: {checksum}, cksum: {cksum}")
         if checksum != cksum:
-            print(f"Warning: Checksum mismatch (expected {cksum}, got {checksum})")
+            print(f" Checksum mismatch!  Expected {cksum}, got {checksum}. Dropping this segment.")
+            return None
 
         seg = cls(src_port, dst_port, seq, ack, type, window, payload)
         seg.cksum = cksum
