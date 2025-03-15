@@ -49,6 +49,14 @@ class Server:
             return True
         return False
 
+    def construct_segment_and_send(self, src_port, dst_port, seq, ack, type, window, payload, addr):
+        """
+        Construct a segment and send it to the client
+        """
+        seg = Segment(src_port, dst_port, seq, ack, type, window, payload)
+        self.server_socket.sendto(seg.construct_raw_data(), addr)
+        return seg
+
     # 需要后期加入防止 segment loss for handshake
     def accept(self):
         """
@@ -75,16 +83,7 @@ class Server:
                 self.ack_num = seg.seq + 1
                 self.seq = 1
                 # Build and send a SYN+ACK
-                synack_seg = Segment(
-                    src_port=self.server_socket.getsockname()[1],
-                    dst_port=seg.src_port,
-                    seq=self.seq,
-                    ack=self.ack_num,
-                    type=(SYN | ACK),
-                    window=4096,
-                    payload=b""
-                )
-                self.server_socket.sendto(synack_seg.construct_raw_data(), client_addr)
+                synack_seg = self.construct_segment_and_send(self.server_socket.getsockname()[1], seg.src_port, self.seq, self.ack_num, (SYN | ACK), 4096, b"", client_addr)
                 print(f"[Server] --> Sent SYN+ACK (seq={synack_seg.seq}, ack={synack_seg.ack}) to client")
 
                 self.server_socket.settimeout(0.5) # set timeout for the final ACK
@@ -153,7 +152,6 @@ class Server:
             except socket.timeout:
                 print("Socket timed out – no more data received.")
 
-
             try:
                 seg = Segment.extract_header(data_bi)
                 if self.is_corrupted(seg):
@@ -162,47 +160,18 @@ class Server:
                 # if seg.type & ACK is true,  the client lost the server's confirmation of the final ack, resend it
                 if seg.type & ACK:
                     print(f"Received ACK segment with seq number {seg.seq}, resending final ack")
-                    ack_seg = Segment(
-                        src_port=self.server_socket.getsockname()[1],
-                        dst_port=addr[1],
-                        seq=conn["server_seq"],
-                        ack=conn["server_ack"],
-                        type=ACK,
-                        window=4096,
-                        payload=b""
-                    )
-                    self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
+                    self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], conn["server_ack"], ACK, 4096, b"", addr)
                     continue
 
                 if seg.seq < self.seq: # if smaller than expected, the ack might have been lost during transmission to client, resend it
                     print(f"Received segment with seq number {seg.seq} smaller than expected {self.seq}, resending ack")
-                    ack_seg = Segment(
-                        src_port=self.server_socket.getsockname()[1],
-                        dst_port=addr[1],
-                        seq=conn["server_seq"],
-                        ack=seg.seq,
-                        type=ACK,
-                        window=4096,
-                        payload=b""
-                    )
-                    self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
+                    self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], seg.seq, ACK, 4096, b"", addr)
                     continue
                 elif seg.seq > self.seq: # ignore it if the segment with next expected seq number is lost
                     print(f"Received segment with unexpected seq number {seg.seq}; expecting {self.seq}, dropping this")
                     continue
 
-                # send ack
-                ack_seg = Segment(
-                    src_port=self.server_socket.getsockname()[1],
-                    dst_port=addr[1],
-                    seq=conn["server_seq"],
-                    ack=seg.seq,
-                    type=ACK,
-                    window=4096,
-                    payload=b""
-                )
-
-                self.server_socket.sendto(ack_seg.construct_raw_data(), addr)
+                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], seg.seq, ACK, 4096, b"", addr)
                 self.seq += 1
             except Exception as e:
                 print(f"Error parsing segment: {e}")
@@ -211,7 +180,6 @@ class Server:
             if seg.type & FIN:
                 print("FIN segment received. Ending.....")
                 break
-
             print(f"=============================Received segment: seq={seg.seq}, size={len(seg.payload)}")
 
             data.extend(seg.payload)

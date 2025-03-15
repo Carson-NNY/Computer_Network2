@@ -5,7 +5,7 @@
 # mrt_client.py - defining client APIs of the mini reliable transport protocol
 #
 
-import socket # for UDP connection
+import socket
 import time
 import struct
 import threading
@@ -358,8 +358,6 @@ class Segment:
             cls.HEADER_CONFIG, raw_data[:cls.HEADER_SIZE]
         )
 
-        if len(raw_data) < cls.HEADER_SIZE + payload_length:
-            raise ValueError(" segment received is incomplete")
 
         payload = raw_data[cls.HEADER_SIZE:cls.HEADER_SIZE + payload_length]
 
