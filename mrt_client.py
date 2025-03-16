@@ -50,6 +50,7 @@ class Client:
         # self.next_seq_num = 1
         self.window_size = 5
         self.window_segments = {}
+        self.fast_retransmit_dict = {}
 
         self.rcv_thread = None
 
@@ -132,12 +133,18 @@ class Client:
             print(f"[Client Thread] Received ACK for seg.ack={seg.ack}, self.send_base={self.send_base}, we move the window by { 1 + seg.ack - self.send_base}.")
             gap = 1 + seg.ack - self.send_base
             self.send_base += gap  # move the window
-            while gap > 0:
-                self.window_segments.pop(self.send_base - gap, None)
-                gap -= 1
-
+            for i in range(self.send_base - gap, self.send_base):
+                self.window_segments.pop(i, None)
+                self.fast_retransmit_dict.pop(i, None)
         else:
-            print(f"[Client Thread] Received ACK != self.send_base: ack {seg.ack} self.send_base={self.send_base}, ignoring for now(需要改变later)")
+            print(f"[Client Thread] Received ACK != self.send_base: ack {seg.ack} self.send_base={self.send_base}, possible detecting out of order packet / lost packet on the receiver side, ignoring for now(需要改变later)")
+            count = self.fast_retransmit_dict.get(seg.ack, None)
+            self.fast_retransmit_dict[seg.ack] = count + 1 if count is not None else 1
+            if self.fast_retransmit_dict.get(seg.ack) == 2: # got 3 duplicate acks, the current send_base is the one that needs to be retransmitted
+                print(f"Fast retransmitting segment with seq={seg.ack} due to 3 duplicate acks, resend self.send_base={self.send_base}")
+                self.client_socket.sendto(self.window_segments[self.send_base][0].construct_raw_data(), self.server_addr)
+                self.window_segments[self.send_base][1].reset()
+
         print(
             f"[Client Thread] Received segment: seq={seg.seq}, ack={seg.ack}, type={seg.type}")
 
@@ -283,7 +290,6 @@ class Client:
         request to close the connection with the server
         blocking until the connection is closed
         """
-
         time.sleep(4)
         self.running = False
         self.client_socket.close()
