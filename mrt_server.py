@@ -61,13 +61,33 @@ class Server:
         print(f"[Server] Listening on port {src_port}, state=LISTEN")
 
     def prepare_delayed_ack(self, addr, conn):
+        """
+        prepare a delayed ack for the received segments.
+
+        This function sets up a timer to send an accumulative ACK after a short
+        delay (0.5 seconds). It helps optimize performance by reducing the overhead
+        of sending an ACK for every received segment.
+
+        Arguments:
+        addr -- the address of the client to send the ACK to
+        conn -- the connection object containing sequence and acknowledgment details
+        """
         with self.ack_lock:
             if self.delayed_ack_timer is None:
-                # Schedule the accumulative ACK to be sent after 0.5 seconds (optimize the performace to avoid the overhead of sending ack for every segment)
                 self.delayed_ack_timer = threading.Timer(0.5, self.send_delayed_ack, args=(addr, conn))
                 self.delayed_ack_timer.start()
 
     def send_delayed_ack(self, addr, conn):
+        """
+        Send a delayed ack for accumulated segments.
+
+        This function transmits an ACK for the highest accumulated sequence number
+        after a scheduled delay.
+
+        Arguments:
+        addr -- the address of the client to send the ACK to
+        conn -- the connection object containing sequence and acknowledgment details
+        """
         with self.ack_lock:
             if self.accumulated_ack is not None:
                 # Send ACK for the highest accumulated sequence number
@@ -76,6 +96,18 @@ class Server:
                 self.delayed_ack_timer = None
 
     def is_corrupted(self, seg):
+        """
+        Check if the received segment is corrupted.
+
+        This function verifies whether the given segment is valid. If the segment
+        is None, it is considered corrupted and ignored.
+
+        Arguments:
+        seg -- the received Segment object
+
+        Return:
+        True if the segment is corrupted, False otherwise.
+        """
         if seg is None:
             print("Received a corrupted segment, ignoring...")
             return True
@@ -83,7 +115,23 @@ class Server:
 
     def construct_segment_and_send(self, src_port, dst_port, seq, ack, type, window, payload, addr):
         """
-        Construct a segment and send it to the client
+        Construct and send a segment to the client.
+
+        This function creates a segment with the specified parameters,
+        transmits it to the given client address, and logs the transmission.
+
+        Arguments:
+        src_port -- the source port of the segment
+        dst_port -- the destination port of the segment
+        seq -- the sequence number of the segment
+        ack -- the acknowledgment number of the segment
+        type -- the type of the segment (e.g., SYN, ACK, FIN)
+        window -- the advertised receive window size
+        payload -- the data payload of the segment
+        addr -- the address of the client to send the segment to
+
+        Return:
+        seg -- the constructed Segment object
         """
         seg = Segment(src_port, dst_port, seq, ack, type, window, payload)
         self.server_socket.sendto(seg.construct_raw_data(), addr)
@@ -91,9 +139,19 @@ class Server:
         return seg
 
     def check_lost_ack(self, conn, addr):
-        '''
-        wait for 3s to check if the client lost the server's ack for the last segment
-        '''
+        """
+        Detect and handle lost ack segments.
+
+        This function waits for up to 3 seconds to check if the client has lost
+        the server's last ACK. If a retransmission request is received, it resends
+        the ACK to ensure reliable communication.
+
+        Arguments:
+        conn -- the connection object containing sequence and acknowledgment details
+        addr -- the address of the client
+
+        If no retransmission request is received after 3 seconds, the function exits.
+        """
         while True:
             self.server_socket.settimeout(3)
             try:
@@ -113,7 +171,14 @@ class Server:
 
     def log(self, port, seg):
         """
-        write log to log_{port}.txt.
+        Write a log entry for the given segment.
+
+        This function records details of the transmitted or received segment in a
+        log file named log_{port}.txt.
+
+        Arguments:
+        port -- the port number of the server socket
+        seg -- the Segment object to be logged
         """
         cur_time = datetime.datetime.utcnow()
         time = cur_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -162,7 +227,7 @@ class Server:
                 self.seq = 1  # set next expected data segment seq number to 1
                 # Build and send a SYN+ACK
                 synack_seg = self.construct_segment_and_send(
-                    self.server_socket.getsockname()[1], seg.src_port,
+                    self.server_socket.getsockname()[1], client_addr[1],
                     self.seq, self.ack_num, (SYN | ACK), 4096, b"", client_addr
                 )
                 print(f"[Server] --> Sent SYN+ACK (seq={synack_seg.seq}, ack={synack_seg.ack}) to client")
@@ -210,8 +275,8 @@ class Server:
     def start_data_threads(self):
         """
         Spawn two child threads:
-        - rcv_handler(): receive segments from the socket into a receive buffer.
-        - sgmnt_handler(): process segments in the receive buffer. 
+        - rcv_handler(): receive segments from the socket into a  buffer.
+        - sgmnt_handler(): process segments in a buffer.
         """
         self.rcv_thread = threading.Thread(target=self.rcv_handler, daemon=True)
         self.rcv_thread.start()
@@ -351,6 +416,18 @@ class Segment:
 
     @classmethod
     def simple_hash(cls, data: bytes) -> int:
+        """
+        Compute a simple hash-based checksum for the given data.
+
+        This function iterates through the bytes of the input data and
+        computes a checksum using a basic hashing formula.
+
+        Arguments:
+        data -- the byte sequence to compute the checksum for
+
+        Return:
+        The computed checksum value as an integer.
+        """
         checksum = 0
         for byte in data:
             checksum = (checksum * 31 + byte) % 65536
@@ -358,7 +435,14 @@ class Segment:
 
     def construct_raw_data(self):
         """
-        Construct the raw bytes representing this segment
+        Construct the raw byte representation of this segment.
+
+        This function creates a byte-encoded segment by packing its header fields
+        and computing a checksum for error detection. The constructed segment
+        consists of the header followed by the payload.
+
+        Return:
+        The raw bytes representing the segment, including the computed checksum.
         """
         header1 = struct.pack(
             self.HEADER_CONFIG,
@@ -391,6 +475,16 @@ class Segment:
     def extract_header(cls, raw_data):
         """
         Parse raw bytes into a Segment object.
+
+        This function extracts the header fields and payload from the given raw byte
+        sequence. It also verifies data integrity by computing and comparing checksums.
+
+        Arguments:
+        raw_data -- the raw byte sequence containing the segment data
+
+        Return:
+        A Segment object if the extraction is successful, with a warning if a
+        checksum mismatch is detected.
         """
         if len(raw_data) < cls.HEADER_SIZE:
             return None

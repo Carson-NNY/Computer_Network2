@@ -27,9 +27,19 @@ class Timer:
         self.start_time = time.time()
 
     def reset(self):
+        """
+        Reset the timer by updating the start time.
+        """
         self.start_time = time.time()
 
     def check_timeout(self):
+        """
+        Check if the segment has timed out
+
+        Return:
+        True if the segment has exceeded the timeout window, False otherwise.
+        """
+
         return time.time() - self.start_time > TIME_WINDOW
 
 class Client:
@@ -70,18 +80,13 @@ class Client:
 
     def rcv_and_sgmnt_handler(self):
         """
-        Single child thread that:
-          2) Non-blocking receives inbound segments (e.g., ACKs, FIN, etc.) and processes them.
+        Process inbound segments in a  child thread.
 
-         further develop, add:
-         - Flow control
+        This function does two things:
+        1) Receives incoming segments (e.g., ACKs, FIN) in a non-blocking manner.
+        2) Monitors for segment timeouts and handles retransmissions if necessary.
         """
         while self.running:
-            # 1) Send any queued segments, 这里我们可能需要把send_segments()拿到外面,
-            # 这个thread只负责(including checking ACK nums of received segments, retransmitting segments when necessary, etc.)
-            # 这个thread应该只是负责在ack没收到的时候timeout重发, 我们要在parent thread进行segment的发送, 但是需要对于发送的segment
-            # 进行buffer 并且我们这里的thread可以访问到, 以便于在ack没收到并且timeout的时候进行重发,
-
             self.receive_acks()
             # check timeout
             self.monitor_timeout()
@@ -90,6 +95,7 @@ class Client:
     def monitor_timeout(self):
         """
         Monitor the timeout of the segments in the window
+        if the timeout is detected, retransmit the segment
         """
         if len(self.window_segments) == 0:
             return
@@ -103,7 +109,7 @@ class Client:
     def receive_acks(self):
         """
         Tries to receive one inbound packet in non-blocking mode.
-        If there's no data, an exception occurs, and we ignore it.
+        when received, process the packet and update the window
         """
         try:
             raw_data, addr = self.client_socket.recvfrom(65535)
@@ -144,7 +150,22 @@ class Client:
 
     def construct_segment_and_send(self, src_port, dst_port, seq, ack, type, window, payload):
         """
-        Construct a segment and send it to the server
+        Construct and send a segment to the server.
+
+        This function creates a segment with the given parameters and transmits it
+        to the server via the client socket.
+
+        Arguments:
+        src_port -- the source port of the segment
+        dst_port -- the destination port of the segment
+        seq -- the sequence number of the segment
+        ack -- the acknowledgment number of the segment
+        type -- the type of the segment (e.g., SYN, ACK, FIN)
+        window -- the advertised receive window size
+        payload -- the data payload of the segment
+
+        Return:
+        seg -- the constructed Segment object
         """
         seg = Segment(src_port, dst_port, seq, ack, type, window, payload)
         self.client_socket.sendto(seg.construct_raw_data(), self.server_addr)
@@ -153,8 +174,16 @@ class Client:
 
     def log(self, port, seg):
         """
-        write log to log_{port}.txt.
+        Write a log entry for the given segment.
+
+        This function records details of the transmitted or received segment in a
+        log file named log_{port}.txt.
+
+        Arguments:
+        port -- the port number of the client socket
+        seg -- the Segment object to be logged
         """
+
         cur_time = datetime.datetime.utcnow()
         time = cur_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
@@ -259,7 +288,7 @@ class Client:
         if not isinstance(data, bytes):
             data = data.encode()
 
-        chunk_size =  self.segment_size - Segment.HEADER_SIZE
+        chunk_size = self.segment_size - Segment.HEADER_SIZE
         self.seq = 1  # reset seq number
         data_sent = 0
         while data_sent < len(data):
@@ -271,7 +300,6 @@ class Client:
                 self.window_segments[self.seq] = (seg, Timer()) # store the segment in the window for waiting the ack or potential retransmission
                 data_sent += len(chunk)
                 self.seq += 1
-
 
         end_seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq,self.ack_num, FIN, 4096, b"")
         end_data = end_seg.construct_raw_data()
@@ -314,6 +342,18 @@ class Segment:
 
     @classmethod
     def simple_hash(cls, data: bytes) -> int:
+        """
+        Compute a simple hash-based checksum for the given data.
+
+        This function iterates through the bytes of the input data and
+        computes a checksum using a basic hashing formula.
+
+        Arguments:
+        data -- the byte sequence to compute the checksum for
+
+        Return:
+        The computed checksum value as an integer.
+        """
         checksum = 0
         for byte in data:
             checksum = (checksum * 31 + byte) % 65536
@@ -321,7 +361,14 @@ class Segment:
 
     def construct_raw_data(self):
         """
-        Construct the raw bytes representing this segment
+        Construct the raw byte representation of this segment.
+
+        This function creates a byte-encoded segment by packing its header fields
+        and computing a checksum for error detection. The constructed segment
+        consists of the header followed by the payload.
+
+        Return:
+        The raw bytes representing the segment, including the computed checksum.
         """
         header1 = struct.pack(
             self.HEADER_CONFIG,
@@ -354,8 +401,17 @@ class Segment:
     def extract_header(cls, raw_data):
         """
         Parse raw bytes into a Segment object.
-        """
 
+        This function extracts the header fields and payload from the given raw byte
+        sequence. It also verifies data integrity by computing and comparing checksums.
+
+        Arguments:
+        raw_data -- the raw byte sequence containing the segment data
+
+        Return:
+        A Segment object if the extraction is successful, with a warning if a
+        checksum mismatch is detected.
+        """
         (src_port, dst_port, seq, ack, type, window, payload_length, cksum) = struct.unpack(
             cls.HEADER_CONFIG, raw_data[:cls.HEADER_SIZE]
         )
