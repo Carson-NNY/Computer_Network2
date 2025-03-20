@@ -1,14 +1,15 @@
-# 
 # Columbia University - CSEE 4119 Computer Networks
 # Assignment 2 - Mini Reliable Transport Protocol
 #
 # mrt_server.py - defining server APIs of the mini reliable transport protocol
 #
 
-import socket # for UDP connection
+import socket  # for UDP connection
 import struct
 import time
+import datetime
 import threading
+from collections import deque
 
 SYN = 0x1
 ACK = 0x2
@@ -27,11 +28,23 @@ class Server:
     def __init__(self):
         self.state = STATE_UNESTABLISHED
         self.server_socket = None
-        self.seq = 0 # also serves as the next expected ack number
+        self.seq = 0  # also serves as the next expected data segment sequence number
         self.ack_num = 0
         self.ack_lock = threading.Lock()
         self.delayed_ack_timer = None
         self.accumulated_ack = None
+
+        # server Buffers
+        self.data_buffer = bytearray()  # in-order application data
+        self.data_buffer_lock = threading.Lock()
+        self.data_buffer_condition = threading.Condition(self.data_buffer_lock)
+
+        self.rcv_buffer = deque() 
+        self.rcv_buffer_lock = threading.Lock()
+        self.rcv_buffer_condition = threading.Condition(self.rcv_buffer_lock)
+     
+        # out-of-order segments (key: seg.seq, value: (segment, addr))
+        self.out_of_order_segments = {}
 
     def init(self, src_port, receive_buffer_size):
         """
@@ -47,10 +60,10 @@ class Server:
         self.state = STATE_LISTEN
         print(f"[Server] Listening on port {src_port}, state=LISTEN")
 
-    def schedule_delayed_ack(self, addr, conn):
+    def prepare_delayed_ack(self, addr, conn):
         with self.ack_lock:
             if self.delayed_ack_timer is None:
-                # Schedule the ACK to be sent after 0.5 seconds
+                # Schedule the accumulative ACK to be sent after 0.5 seconds (optimize the performace to avoid the overhead of sending ack for every segment)
                 self.delayed_ack_timer = threading.Timer(0.5, self.send_delayed_ack, args=(addr, conn))
                 self.delayed_ack_timer.start()
 
@@ -58,15 +71,9 @@ class Server:
         with self.ack_lock:
             if self.accumulated_ack is not None:
                 # Send ACK for the highest accumulated sequence number
-                self.construct_segment_and_send(
-                    self.server_socket.getsockname()[1], addr[1],
-                    conn["server_seq"], self.accumulated_ack,
-                    ACK, 4096, b"", addr
-                )
-                # Reset accumulated ACK and timer
+                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], self.accumulated_ack,ACK, 4096, b"", addr)
                 self.accumulated_ack = None
                 self.delayed_ack_timer = None
-
 
     def is_corrupted(self, seg):
         if seg is None:
@@ -80,25 +87,52 @@ class Server:
         """
         seg = Segment(src_port, dst_port, seq, ack, type, window, payload)
         self.server_socket.sendto(seg.construct_raw_data(), addr)
+        self.log(src_port, seg)
         return seg
-    
+
     def check_lost_ack(self, conn, addr):
         '''
-        wait for 4s to check if the client lost the server's ack for the last segment
+        wait for 3s to check if the client lost the server's ack for the last segment
         '''
         while True:
-            self.server_socket.settimeout(4)
+            self.server_socket.settimeout(3)
             try:
                 data_bi, addr2 = self.server_socket.recvfrom(self.receive_buffer_size)
                 seg = Segment.extract_header(data_bi)
                 if self.is_corrupted(seg):
                     continue
+                self.log(self.server_socket.getsockname()[1], seg)
                 # resend the ack
-                print("11111: test sending tjhe last ack====================")
-                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], seg.seq, ACK, 4096, b"", addr)
+                self.construct_segment_and_send(
+                    self.server_socket.getsockname()[1], addr[1],
+                    conn["server_seq"], seg.seq, ACK, 4096, b"", addr
+                )
             except socket.timeout:
                 print("no retransmission request after 4 seconds, ending the connection")
                 return
+
+    def log(self, port, seg):
+        """
+        write log to log_{port}.txt.
+        """
+        cur_time = datetime.datetime.utcnow()
+        time = cur_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+        if seg.type & 0x1 and seg.type & 0x2:
+            seg_type = "SYN-ACK"
+        elif seg.type & 0x1:
+            seg_type = "SYN"
+        elif seg.type & 0x2:
+            seg_type = "ACK"
+        elif seg.type & 0x4:
+            seg_type = "FIN"
+        else:
+            seg_type = "DATA" # data segment
+
+        log_line = f"{time} {seg.src_port} {seg.dst_port} {seg.seq} {seg.ack} {seg_type} {seg.payload_length}\n"
+
+        with open(f"log_{port}.txt", "a") as f:
+            f.write(log_line)
 
     # 需要后期加入防止 segment loss for handshake
     def accept(self):
@@ -115,22 +149,26 @@ class Server:
 
         # Wait for a SYN from a client
         while True:
-            raw_data, client_addr = self.server_socket.recvfrom(self.receive_buffer_size) # we have timer on the client so it does not need to set timeout
+            raw_data, client_addr = self.server_socket.recvfrom(self.receive_buffer_size)
             seg = Segment.extract_header(raw_data)
             if self.is_corrupted(seg):
                 continue
+            self.log(self.server_socket.getsockname()[1], seg)
 
             if (seg.type & SYN) and not (seg.type & ACK):
                 print(f"[Server] <-- Received SYN (seq={seg.seq}) from {client_addr}")
                 self.state = STATE_SYN_RCVD
                 self.ack_num = seg.seq + 1
-                self.seq = 1
+                self.seq = 1  # set next expected data segment seq number to 1
                 # Build and send a SYN+ACK
-                synack_seg = self.construct_segment_and_send(self.server_socket.getsockname()[1], seg.src_port, self.seq, self.ack_num, (SYN | ACK), 4096, b"", client_addr)
+                synack_seg = self.construct_segment_and_send(
+                    self.server_socket.getsockname()[1], seg.src_port,
+                    self.seq, self.ack_num, (SYN | ACK), 4096, b"", client_addr
+                )
                 print(f"[Server] --> Sent SYN+ACK (seq={synack_seg.seq}, ack={synack_seg.ack}) to client")
 
-                self.server_socket.settimeout(0.5) # set timeout for the final ACK
-                # Now wait for the final ACK from the  client
+                self.server_socket.settimeout(0.5)  # set timeout for the final ACK
+                # Now wait for the final ACK from the client
                 while True:
                     print("Waiting for the final ACK...")
                     try:
@@ -141,9 +179,9 @@ class Server:
                         continue
 
                     seg2 = Segment.extract_header(data_bi2)
-                    if seg2 is None:
-                        print("Received a corrupted segment, ignoring...")
+                    if self.is_corrupted(seg2):
                         continue
+                    self.log(self.server_socket.getsockname()[1], seg2)
                     # Check that it's the final ACK (and not another SYN)
                     if (seg2.type & ACK) and not (seg2.type & SYN):
                         if seg2.ack == self.seq + 1:
@@ -151,7 +189,6 @@ class Server:
                             self.state = STATE_ESTABLISHED
                             print(f"[Server] Connection with {client_addr} is now ESTABLISHED")
                             self.server_socket.settimeout(None)
-                            # Build a connection object to store state for this client
                             conn = {
                                 "client_addr": client_addr,
                                 "buffer": bytearray(),
@@ -159,17 +196,99 @@ class Server:
                                 "server_seq": self.seq,
                                 "server_ack": self.ack_num
                             }
+                            self.start_data_threads()
                             return conn
                         else:
-                            print(
-                                f"[Server] Received ACK with unexpected ack number {seg2.ack}; expecting {self.seq + 1}")
+                            print(f"[Server] Received ACK with unexpected ack number {seg2.ack}; expecting {self.seq + 1}")
                     else:
                         print("[Server] Received an unexpected segment during handshake; ignoring.")
                         print("resending SYN+ACK")
                         self.server_socket.sendto(synack_seg.construct_raw_data(), client_addr)
-
             else:
                 print("[Server] Received non-SYN or irrelevant segment while listening; ignoring.")
+
+    def start_data_threads(self):
+        """
+        Spawn two child threads:
+        - rcv_handler(): receive segments from the socket into a receive buffer.
+        - sgmnt_handler(): process segments in the receive buffer. 
+        """
+        self.rcv_thread = threading.Thread(target=self.rcv_handler, daemon=True)
+        self.rcv_thread.start()
+        self.sgmnt_thread = threading.Thread(target=self.sgmnt_handler, daemon=True)
+        self.sgmnt_thread.start()
+
+    def rcv_handler(self):
+        """
+        rcv_handler(): receive segments over the socket connection whenever they arrive 
+        then put them into the receive buffer.
+        """
+        while self.state == STATE_ESTABLISHED:
+            try:
+                data_bi, addr = self.server_socket.recvfrom(self.receive_buffer_size)
+            except socket.timeout:
+                continue
+            except OSError:
+                break  # Socket closed
+            seg = Segment.extract_header(data_bi)
+            if self.is_corrupted(seg):
+                continue
+            self.log(self.server_socket.getsockname()[1], seg)
+            with self.rcv_buffer_condition:
+                self.rcv_buffer.append((seg, addr))
+                self.rcv_buffer_condition.notify()
+
+    def sgmnt_handler(self):
+        """
+        sgmnt_handler(): continually process segments in the receive buffer,
+        to handle out-of-order arrivals and obtain in-order application data into the data buffer.
+        """
+        while self.state == STATE_ESTABLISHED:
+            with self.rcv_buffer_condition:
+                while not self.rcv_buffer:
+                    self.rcv_buffer_condition.wait()
+                seg, addr = self.rcv_buffer.popleft()
+
+            # Process ACK segments (resend the lost final ACK confirmation during handshake)
+            if seg.type & ACK:
+                print(f"Received ACK segment with seq number {seg.seq}, resending final ack")
+                self.construct_segment_and_send(
+                    self.server_socket.getsockname()[1], addr[1],
+                    0, 0, ACK, 4096, b"", addr)
+                continue
+
+            # Protection against out-of-order delivery:
+            if seg.seq < self.seq:
+                # Case 1: seg.seq < self.seq (lost server's ack scenario), so resend last in-order ACK.
+                print(f"Received segment with seq {seg.seq} less than expected {self.seq}; resending ACK for last in-order segment")
+                self.construct_segment_and_send(
+                    self.server_socket.getsockname()[1], addr[1],
+                    0, self.seq - 1, ACK, 4096, b"", addr)
+                continue
+            elif seg.seq > self.seq:
+                # Case 2: seg.seq > self.seq (out-of-order arrival)
+                print(f"Received out-of-order segment: seq={seg.seq}, expected={self.seq}. Buffering segment.")
+                self.out_of_order_segments[seg.seq] = (seg, addr)
+                continue
+            else:
+                # Case 3: In-order segment received (seg.seq == self.seq)
+                print(f"Received in-order segment: seq={seg.seq}, delivering data.")
+                with self.data_buffer_condition:
+                    self.data_buffer.extend(seg.payload)
+                    self.data_buffer_condition.notify_all()
+                self.seq += 1
+                # Check if any buffered out-of-order segments can now satisfy the in-order 
+                while self.seq in self.out_of_order_segments:
+                    buffered_seg, buffered_addr = self.out_of_order_segments.pop(self.seq)
+                    print(f"Delivering buffered out-of-order segment: seq={buffered_seg.seq}")
+                    with self.data_buffer_condition:
+                        self.data_buffer.extend(buffered_seg.payload)
+                        self.data_buffer_condition.notify_all()
+                    self.seq += 1
+                # Schedule delayed ACK for the highest in-order seq delivered
+                with self.ack_lock:
+                    self.accumulated_ack = self.seq - 1
+                self.prepare_delayed_ack(addr, {"server_seq": 0, "server_ack": self.ack_num})
 
     def receive(self, conn, length):
         """
@@ -187,48 +306,17 @@ class Server:
         data -- the bytes received from the client, guaranteed to be in its original order
         """
         data = bytearray()
-        self.seq = 1
         while len(data) < length:
-            data_bi, addr = self.server_socket.recvfrom(self.receive_buffer_size)
-
-            seg = Segment.extract_header(data_bi)
-            if self.is_corrupted(seg):
-                continue
-
-            # if seg.type & ACK is true,  the client lost the server's confirmation of the final ack for the handshake, resend it
-            if seg.type & ACK:
-                print(f"Received ACK segment with seq number {seg.seq}, resending final ack")
-                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"], conn["server_ack"], ACK, 4096, b"", addr)
-                continue
-
-            # got in-order seg
-            if seg.seq == self.seq:
-                # wait 0.5s before sending the ack, take advantage of accumulated ack to avoid overhead of sending ack for every segment
-
-                with self.ack_lock:
-                    # Update the highest ACK to send
-                    self.accumulated_ack = seg.seq
-                # if self.accumulated_ack == 17 and test == 0:
-                #     test = 1
-                #     continue
-                # Schedule delayed ACK if not already scheduled
-                self.schedule_delayed_ack(addr, conn)
-                self.seq += 1
-                print(f"Received segment with expected seq number {seg.seq}, already scheduled ACK for {self.seq - 1}")
-                
-            else: # two cases: 1. seg.seq < self.seq when the client lost the server's ack  2. seg.seq > self.seq when the client lost the packet with those lost seq number.
-                print(f"Received segment with unexpected seq number {seg.seq}; expecting {self.seq}, now re-sending ACK for the last in-order segment: ( resend the lost server's ack ///// do Fast-Transmission work, resend the ack for the highest accumulated seq number)")
-                self.construct_segment_and_send(self.server_socket.getsockname()[1], addr[1], conn["server_seq"],
-                                            self.seq - 1, ACK, 4096, b"", addr)
-                continue
-
-            if seg.type & FIN:
-                print("FIN segment received. Ending.....")
-                break
-            print(f"=============================Received segment: seq={seg.seq}, size={len(seg.payload)}")
-
-            data.extend(seg.payload)
-        self.check_lost_ack(conn, addr)
+            with self.data_buffer_condition:
+                while len(self.data_buffer) == 0:
+                    self.data_buffer_condition.wait()
+                len1 = length - len(data)
+                chunk = self.data_buffer[:len1]
+                data.extend(chunk)
+                del self.data_buffer[:len1]
+        
+        # then check if the client lost the last ACK
+        self.check_lost_ack(conn, conn["client_addr"])
         return bytes(data)
 
     def close(self):
@@ -240,7 +328,8 @@ class Server:
             if self.delayed_ack_timer is not None:
                 self.delayed_ack_timer.cancel()
                 self.delayed_ack_timer = None
-        self.server_socket.close()
+        if self.server_socket:
+            self.server_socket.close()
         print("Server socket closed.")
 
 
@@ -303,16 +392,12 @@ class Segment:
         """
         Parse raw bytes into a Segment object.
         """
-
+        if len(raw_data) < cls.HEADER_SIZE:
+            return None
         (src_port, dst_port, seq, ack, type, window, payload_length, cksum) = struct.unpack(
             cls.HEADER_CONFIG, raw_data[:cls.HEADER_SIZE]
         )
-
-        # if len(raw_data) < cls.HEADER_SIZE + payload_length:
-        #     raise ValueError(" segment received is incomplete")
-
         payload = raw_data[cls.HEADER_SIZE:cls.HEADER_SIZE + payload_length]
-
         temp_header = struct.pack(
             cls.HEADER_CONFIG,
             src_port,
@@ -324,13 +409,11 @@ class Segment:
             payload_length,
             0
         )
-        checksum = Segment.simple_hash(temp_header + payload)
-        print(f"checksum: {checksum}, cksum: {cksum}")
-        if checksum != cksum:
-            print(f" Checksum mismatch!  Expected {cksum}, got {checksum}. Dropping this segment.")
+        computed_cksum = Segment.simple_hash(temp_header + payload)
+        print(f"checksum: {computed_cksum}, cksum: {cksum}")
+        if computed_cksum != cksum:
+            print(f" Checksum mismatch!  Expected {cksum}, got {computed_cksum}. Dropping this segment.")
             return None
-
         seg = cls(src_port, dst_port, seq, ack, type, window, payload)
         seg.cksum = cksum
         return seg
-

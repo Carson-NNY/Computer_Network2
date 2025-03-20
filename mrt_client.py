@@ -9,6 +9,7 @@ import socket
 import time
 import struct
 import threading
+import datetime
 
 
 SYN = 0x1
@@ -31,10 +32,6 @@ class Timer:
     def check_timeout(self):
         return time.time() - self.start_time > TIME_WINDOW
 
-########## PLAN:
-# 1. sent data -> expect ack: (if not received, wait for timeout and resend)
-# data loss (lack of ack), detect(expect) + timer
-
 class Client:
     def __init__(self):
         self.state = STATE_UNESTABLISHED
@@ -47,7 +44,6 @@ class Client:
 
         # Go-Back-N variables
         self.send_base = 1
-        # self.next_seq_num = 1
         self.window_size = 5
         self.window_segments = {}
         self.fast_retransmit_dict = {}
@@ -78,9 +74,6 @@ class Client:
           2) Non-blocking receives inbound segments (e.g., ACKs, FIN, etc.) and processes them.
 
          further develop, add:
-         - Retransmission timers
-         - Sliding window
-         - Checksum and corruption handling
          - Flow control
         """
         while self.running:
@@ -90,12 +83,9 @@ class Client:
             # 进行buffer 并且我们这里的thread可以访问到, 以便于在ack没收到并且timeout的时候进行重发,
 
             self.receive_acks()
-
             # check timeout
             self.monitor_timeout()
 
-            # Avoid spinning too fast
-            # time.sleep(0.001)
 
     def monitor_timeout(self):
         """
@@ -108,6 +98,7 @@ class Client:
             # retransmit the segment
             self.client_socket.sendto(self.window_segments[self.send_base][0].construct_raw_data(), self.server_addr)
             self.window_segments[self.send_base][1].reset()
+            self.log(self.client_socket.getsockname()[1], self.window_segments[self.send_base][0])
 
     def receive_acks(self):
         """
@@ -122,6 +113,9 @@ class Client:
             return
 
         seg = Segment.extract_header(raw_data)
+        # write the log
+        self.log(self.client_socket.getsockname()[1], seg)
+
         if not seg.type & ACK:
             print("not an ACK segment")
             return
@@ -140,7 +134,7 @@ class Client:
             print(f"[Client Thread] Received ACK != self.send_base: ack {seg.ack} self.send_base={self.send_base}, possible detecting out of order packet / lost packet on the receiver side, ignoring for now(需要改变later)")
             count = self.fast_retransmit_dict.get(seg.ack, None)
             self.fast_retransmit_dict[seg.ack] = count + 1 if count is not None else 1
-            if self.fast_retransmit_dict.get(seg.ack) == 2: # got 3 duplicate acks, the current send_base is the one that needs to be retransmitted
+            if self.fast_retransmit_dict.get(seg.ack) == 3: # got 3 duplicate acks, the current send_base is the one that needs to be retransmitted
                 print(f"Fast retransmitting segment with seq={seg.ack} due to 3 duplicate acks, resend self.send_base={self.send_base}")
                 self.client_socket.sendto(self.window_segments[self.send_base][0].construct_raw_data(), self.server_addr)
                 self.window_segments[self.send_base][1].reset()
@@ -148,32 +142,37 @@ class Client:
         print(
             f"[Client Thread] Received segment: seq={seg.seq}, ack={seg.ack}, type={seg.type}")
 
-
-        ############################################################################################################
-
-        # client-side:
-        # 1) Send SYN to the server
-          # seq = 1, ack = 0, type = SYN
-        # 2) Wait for SYN+ACK from the server (check server ack == client seq + 1)) -> receive SYN+ACK -> send final ACK
-            # seq = 2, ack = 2, type = ACK
-
-
-        # server-side:
-        # 1) Wait for SYN from the client -> receive SYN and then send SYN+ACK
-          # seq = 1, ack = 2(seq from the client + 1), type = SYN+ACK
-        # 2) Wait for final ACK from the client -> receive ACK
-            # seq = 2, ack = 2, type = ACK
-
-        ############################################################################################################
-
-
     def construct_segment_and_send(self, src_port, dst_port, seq, ack, type, window, payload):
         """
         Construct a segment and send it to the server
         """
         seg = Segment(src_port, dst_port, seq, ack, type, window, payload)
         self.client_socket.sendto(seg.construct_raw_data(), self.server_addr)
+        self.log(src_port, seg)
         return seg
+
+    def log(self, port, seg):
+        """
+        write log to log_{port}.txt.
+        """
+        cur_time = datetime.datetime.utcnow()
+        time = cur_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+        if seg.type & 0x1 and seg.type & 0x2:
+            seg_type = "SYN-ACK"
+        elif seg.type & 0x1:
+            seg_type = "SYN"
+        elif seg.type & 0x2:
+            seg_type = "ACK"
+        elif seg.type & 0x4:
+            seg_type = "FIN"
+        else:
+            seg_type = "DATA" # data segment
+
+        log_line = f"{time} {seg.src_port} {seg.dst_port} {seg.seq} {seg.ack} {seg_type} {seg.payload_length}\n"
+
+        with open(f"log_{port}.txt", "a") as f:
+            f.write(log_line)
 
     def connect(self):
         """
@@ -192,7 +191,7 @@ class Client:
         print(f"[Client] Sent SYN (seq={self.seq}) to server.")
 
         # Wait for SYN+ACK from the server (blocking)
-        self.client_socket.settimeout(1)
+        self.client_socket.settimeout(0.5)
         while True:
             try:
                 raw_data, addr = self.client_socket.recvfrom(65535)
@@ -202,6 +201,7 @@ class Client:
                 continue
 
             seg1 = Segment.extract_header(raw_data)
+            self.log(self.client_socket.getsockname()[1], seg1)
             if (seg1.type & SYN) and (seg1.type & ACK):
                 if seg1.ack == self.seq + 1:
                     print(f"[Client] Received SYN+ACK (seq={seg1.seq}, ack={seg1.ack})")
@@ -231,11 +231,13 @@ class Client:
                 if (seg1.type & SYN) and (seg1.type & ACK): # request from the server due to possible lost final ACK
                     print("resend final ACK")
                     self.client_socket.sendto(final_ack.construct_raw_data(), self.server_addr)
+                    self.log(self.client_socket.getsockname()[1], final_ack)
                 elif seg1.type & ACK: # received the final ACK confirmation from server
                     print("received final ACK from server")
                     break
             except socket.timeout:  # the final ACK confirmation from server is lost, resend the final ACK
                 self.client_socket.sendto(final_ack.construct_raw_data(), self.server_addr)
+                self.log(self.client_socket.getsockname()[1], final_ack)
                 print("timeout, resend final ACK")
 
         print("[Client] Handshake complete. Socket set to non-blocking mode, state=ESTABLISHED.")
@@ -257,7 +259,6 @@ class Client:
         if not isinstance(data, bytes):
             data = data.encode()
 
-        bytes_sent = 0
         chunk_size =  self.segment_size - Segment.HEADER_SIZE
         self.seq = 1  # reset seq number
         data_sent = 0
@@ -269,28 +270,27 @@ class Client:
                 seg = self.construct_segment_and_send(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, 0, 4096, chunk)
                 self.window_segments[self.seq] = (seg, Timer()) # store the segment in the window for waiting the ack or potential retransmission
                 data_sent += len(chunk)
-                bytes_sent += len(chunk)
                 self.seq += 1
 
 
         end_seg = Segment(self.client_socket.getsockname()[1], self.server_addr[1], self.seq,self.ack_num, FIN, 4096, b"")
         end_data = end_seg.construct_raw_data()
         self.client_socket.sendto(end_data, self.server_addr)
-        # self.window_segments[self.seq] = (end_data, Timer())
+        self.log(self.client_socket.getsockname()[1], end_seg)
         print(f"[Client] sent final FIN seg.")
 
         while len(self.window_segments) > 0:
             time.sleep(0.15)
             print(f"[Client] Waiting for all segments to be acknowledged...")
 
-        return bytes_sent
+        return data_sent
 
     def close(self):
         """
         request to close the connection with the server
         blocking until the connection is closed
         """
-        time.sleep(4)
+        time.sleep(3)
         self.running = False
         self.client_socket.close()
         print("Client socket closed.")
