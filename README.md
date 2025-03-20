@@ -2,7 +2,6 @@
 ## Guanhong Liu
 ## GitHub username: Carson-NNY
 
-*Please replace this text with information on how to run your code, description of each file in the directory, and any assumptions you have made for your code*
 This project implements a Mini Reliable Transport (MRT) Protocol on top of UDP, featuring reliability mechanisms such as protection against segment losses via segment retransmissions, protection against segment corruption via checksums, protection against out-of-order delivery of segments, fast transmission if the latency is high, transmission of small or large amounts of data  
 
 ## steps to execute the program:

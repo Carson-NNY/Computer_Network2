@@ -15,6 +15,8 @@ import datetime
 SYN = 0x1
 ACK = 0x2
 FIN = 0x4
+SEG = 0x0
+
 
 STATE_UNESTABLISHED = 0
 STATE_SYN_SENT = 1
@@ -296,7 +298,7 @@ class Client:
                 print("self.seq: ", self.seq )
 
                 chunk = data[data_sent:data_sent + chunk_size]
-                seg = self.construct_segment_and_send(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, 0, 4096, chunk)
+                seg = self.construct_segment_and_send(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, SEG, 4096, chunk)
                 self.window_segments[self.seq] = (seg, Timer()) # store the segment in the window for waiting the ack or potential retransmission
                 data_sent += len(chunk)
                 self.seq += 1
