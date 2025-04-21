@@ -295,8 +295,6 @@ class Client:
         data_sent = 0
         while data_sent < len(data):
             if self.seq < self.send_base + self.window_size:
-                print("self.seq: ", self.seq )
-
                 chunk = data[data_sent:data_sent + chunk_size]
                 seg = self.construct_segment_and_send(self.client_socket.getsockname()[1], self.server_addr[1], self.seq, self.ack_num, SEG, 4096, chunk)
                 self.window_segments[self.seq] = (seg, Timer()) # store the segment in the window for waiting the ack or potential retransmission
